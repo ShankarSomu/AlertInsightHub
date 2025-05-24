@@ -444,39 +444,14 @@ def get_webhook_queue_items(status=None, date=None, limit=50):
         queue_table.meta.client.get_waiter('table_exists').wait(TableName='webhook_queue')
         print("webhook_queue table created successfully")
     
-    # Also check for postmark_data table
-    if 'postmark_data' not in existing_tables:
-        print("Creating postmark_data table as it doesn't exist")
-        postmark_table = dynamodb.create_table(
-            TableName='postmark_data',
-            KeySchema=[
-                {'AttributeName': 'id', 'KeyType': 'HASH'},
-            ],
-            AttributeDefinitions=[
-                {'AttributeName': 'id', 'AttributeType': 'S'},
-                {'AttributeName': 'date', 'AttributeType': 'S'},
-            ],
-            GlobalSecondaryIndexes=[
-                {
-                    'IndexName': 'date-index',
-                    'KeySchema': [
-                        {'AttributeName': 'date', 'KeyType': 'HASH'},
-                    ],
-                    'Projection': {'ProjectionType': 'ALL'},
-                    'ProvisionedThroughput': {'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
-                }
-            ],
-            ProvisionedThroughput={'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
-        )
-        # Wait for table to be created
-        postmark_table.meta.client.get_waiter('table_exists').wait(TableName='postmark_data')
-        print("postmark_data table created successfully")
-    
     table = dynamodb.Table('webhook_queue')
     
     try:
+        # For debugging
+        print(f"Getting webhook queue items with status={status}, date={date}, limit={limit}")
+        
         # Use scan instead of query for simplicity and to avoid index issues
-        if status and date:
+        if status and date and isinstance(date, str):
             # Filter by both status and date
             response = table.scan(
                 FilterExpression='#status = :status AND #date = :date',
@@ -492,7 +467,7 @@ def get_webhook_queue_items(status=None, date=None, limit=50):
                 ExpressionAttributeValues={':status': status},
                 Limit=limit
             )
-        elif date:
+        elif date and isinstance(date, str):
             # Filter by date only
             response = table.scan(
                 FilterExpression='#date = :date',
@@ -504,7 +479,14 @@ def get_webhook_queue_items(status=None, date=None, limit=50):
             # Scan all items
             response = table.scan(Limit=limit)
         
-        return response['Items']
+        items = response.get('Items', [])
+        print(f"Found {len(items)} webhook queue items")
+        
+        # For debugging, print the first item if available
+        if items:
+            print(f"First item: {items[0]}")
+        
+        return items
     except Exception as e:
         print(f"Error in get_webhook_queue_items: {e}")
         return []

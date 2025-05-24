@@ -1070,37 +1070,25 @@ async def webhook_handler(request: Request):
         data = await request.json()
         logger.info(f"Received webhook data: {data}")
         
-        # Store the raw webhook data in the postmark_data table
+        # Store the webhook data in a single table
         webhook_id = str(uuid.uuid4())
         current_time = datetime.now()
         current_date = current_time.strftime("%Y-%m-%d")
         timestamp_iso = current_time.isoformat()
         
-        # Create postmark data item
-        postmark_item = {
-            "id": webhook_id,
-            "timestamp": timestamp_iso,
-            "date": current_date,
-            "raw_data": data
-        }
-        
-        # Save to postmark_data table
-        dynamodb = db.get_dynamodb_client()
-        postmark_table = dynamodb.Table('postmark_data')
-        postmark_table.put_item(Item=postmark_item)
-        logger.info(f"Stored raw postmark data: {webhook_id}")
-        
-        # Create queue item with pending status
+        # Create queue item with pending status and raw data
         queue_item = {
             "id": webhook_id,
             "timestamp": timestamp_iso,
             "date": current_date,
             "status": "pending",
             "source": "postmark",
-            "processed_at": None
+            "processed_at": None,
+            "raw_data": data  # Include raw data directly in the queue item
         }
         
         # Save to queue table
+        dynamodb = db.get_dynamodb_client()
         queue_table = dynamodb.Table('webhook_queue')
         queue_table.put_item(Item=queue_item)
         logger.info(f"Created queue item with pending status: {webhook_id}")

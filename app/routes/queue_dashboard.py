@@ -252,6 +252,45 @@ async def get_queue_dashboard():
                 }
             }
             
+            // Load queue data
+            function loadQueueData(date = null, status = null) {
+                let url = '/api/webhooks/queue';
+                const params = [];
+                
+                // Only add valid parameters
+                if (date && date.trim() !== '') params.push(`date=${date}`);
+                if (status && status !== 'all') params.push(`status=${status}`);
+                if (params.length > 0) url += '?' + params.join('&');
+                
+                console.log('Loading queue data from:', url);
+                
+                // Get the queue data directly
+                fetch(url)
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! Status: ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    console.log('Queue data received:', data.length, 'items');
+                    queueData = data;
+                    
+                    // Render the queue table with the data
+                    renderQueueTable(data);
+                })
+                .catch(error => {
+                    console.error('Error loading queue data:', error);
+                    document.getElementById('queue-body').innerHTML = 
+                        `<tr><td colspan="6" style="text-align: center; padding: 20px; color: red;">
+                            Error loading data: ${error.message}. 
+                            <button onclick="loadSampleWebhooks()" style="margin-left: 10px;">
+                                Load Sample Data
+                            </button>
+                        </td></tr>`;
+                });
+            }
+            
             // Render queue table
             function renderQueueTable(data) {
                 const tbody = document.getElementById('queue-body');
@@ -259,7 +298,12 @@ async def get_queue_dashboard():
                 
                 if (data.length === 0) {
                     const row = document.createElement('tr');
-                    row.innerHTML = `<td colspan="6" style="text-align: center; padding: 20px;">No webhook queue items found.</td>`;
+                    row.innerHTML = `<td colspan="6" style="text-align: center; padding: 20px;">
+                        No webhook queue items found.
+                        <button onclick="loadSampleWebhooks()" style="margin-left: 10px;">
+                            Load Sample Data
+                        </button>
+                    </td>`;
                     tbody.appendChild(row);
                     return;
                 }
@@ -289,26 +333,6 @@ async def get_queue_dashboard():
                 });
             }
             
-            // Load queue data
-            function loadQueueData(date = null, status = null) {
-                let url = '/api/webhooks/queue';
-                const params = [];
-                
-                if (date) params.push(`date=${date}`);
-                if (status && status !== 'all') params.push(`status=${status}`);
-                if (params.length > 0) url += '?' + params.join('&');
-                
-                fetch(url)
-                    .then(response => response.json())
-                    .then(data => {
-                        queueData = data;
-                        renderQueueTable(data);
-                    })
-                    .catch(error => {
-                        console.error('Error loading queue data:', error);
-                    });
-            }
-            
             // Load stats data
             function loadStatsData(date = null) {
                 let url = '/api/webhooks/stats';
@@ -332,7 +356,51 @@ async def get_queue_dashboard():
                 window.location.href = `/queue/details/${id}`;
             }
             
-            // Reprocess webhook
+            // Apply filters
+            function applyFilters() {
+                const dateFilter = document.getElementById('date-filter').value;
+                const statusFilter = document.getElementById('status-filter').value;
+                
+                // Only use date filter if it's not empty
+                const dateParam = dateFilter && dateFilter.trim() !== '' ? dateFilter : null;
+                const statusParam = statusFilter !== 'all' ? statusFilter : null;
+                
+                loadQueueData(dateParam, statusParam);
+                loadStatsData(dateParam);
+            }
+            
+            // Load sample webhooks
+            function loadSampleWebhooks() {
+                console.log('Loading sample webhooks...');
+                fetch('/api/webhooks/load-samples', {
+                    method: 'POST'
+                })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! Status: ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(result => {
+                    console.log('Sample webhooks loaded:', result);
+                    if (result.status === 'success') {
+                        alert('Sample webhooks loaded successfully');
+                        // Reload data with a slight delay to ensure DynamoDB has time to update
+                        setTimeout(() => {
+                            loadQueueData(null, null);
+                            loadStatsData(null);
+                        }, 1000);
+                    } else {
+                        alert('Error: ' + result.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error loading sample webhooks:', error);
+                    alert('Error loading sample webhooks: ' + error.message);
+                });
+            }
+            
+            // Reprocess webhook from queue table
             function reprocess(id) {
                 fetch(`/api/webhooks/queue/${id}/reprocess`, {
                     method: 'POST'
@@ -353,31 +421,67 @@ async def get_queue_dashboard():
                 });
             }
             
-            // Apply filters
-            function applyFilters() {
-                const dateFilter = document.getElementById('date-filter').value;
-                const statusFilter = document.getElementById('status-filter').value;
-                
-                loadQueueData(dateFilter || null, statusFilter);
-                loadStatsData(dateFilter || null);
+            // Process pending webhooks
+            function processWebhooks() {
+                fetch('/api/webhooks/process', {
+                    method: 'POST'
+                })
+                .then(response => response.json())
+                .then(result => {
+                    if (result.status === 'success') {
+                        alert('Webhooks processed successfully');
+                        // Reload data
+                        applyFilters();
+                    } else {
+                        alert('Error: ' + result.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error processing webhooks:', error);
+                    alert('Error processing webhooks');
+                });
+            }
+            
+            // Clear webhooks
+            function clearWebhooks() {
+                if (confirm('Are you sure you want to clear all webhooks?')) {
+                    fetch('/api/webhooks/clear', {
+                        method: 'POST'
+                    })
+                    .then(response => response.json())
+                    .then(result => {
+                        if (result.status === 'success') {
+                            alert('Webhooks cleared successfully');
+                            // Reload data
+                            applyFilters();
+                        } else {
+                            alert('Error: ' + result.message);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error clearing webhooks:', error);
+                        alert('Error clearing webhooks');
+                    });
+                }
             }
             
             // Initialize page
             document.addEventListener('DOMContentLoaded', function() {
-                // Set today's date as default
-                const today = new Date().toISOString().split('T')[0];
-                document.getElementById('date-filter').value = today;
+                // Set empty date filter by default
+                document.getElementById('date-filter').value = '';
+                document.getElementById('status-filter').value = 'all';
                 
-                // Load initial data
-                loadQueueData(today);
-                loadStatsData(today);
+                // Load initial data without any filters
+                loadQueueData(null, null);
+                loadStatsData(null);
                 
                 // Set up event listeners
                 document.getElementById('apply-filters').addEventListener('click', applyFilters);
                 document.getElementById('reset-filters').addEventListener('click', function() {
-                    document.getElementById('date-filter').value = today;
+                    document.getElementById('date-filter').value = '';
                     document.getElementById('status-filter').value = 'all';
-                    applyFilters();
+                    loadQueueData(null, null);
+                    loadStatsData(null);
                 });
             });
         </script>
@@ -436,7 +540,9 @@ async def get_webhook_details(webhook_id: str):
         <script>
             // Load webhook details
             function loadWebhookDetails() {
-                fetch(`/api/webhooks/queue/WEBHOOK_ID`)
+                const webhookId = window.location.pathname.split('/').pop();
+                
+                fetch(`/api/webhooks/queue/${webhookId}`)
                     .then(response => response.json())
                     .then(data => {
                         // Update webhook info
@@ -489,7 +595,7 @@ async def get_webhook_details(webhook_id: str):
                         }
                         
                         // Load raw data
-                        return fetch(`/api/webhooks/data/WEBHOOK_ID`);
+                        return fetch(`/api/webhooks/data/${webhookId}`);
                     })
                     .then(response => response.json())
                     .then(data => {
@@ -503,9 +609,11 @@ async def get_webhook_details(webhook_id: str):
                     });
             }
             
-            // Reprocess webhook
+            // Reprocess webhook from details page
             function reprocessWebhook() {
-                fetch(`/api/webhooks/queue/WEBHOOK_ID/reprocess`, {
+                const webhookId = window.location.pathname.split('/').pop();
+                
+                fetch(`/api/webhooks/queue/${webhookId}/reprocess`, {
                     method: 'POST'
                 })
                 .then(response => response.json())
@@ -526,12 +634,6 @@ async def get_webhook_details(webhook_id: str):
             
             // Initialize page
             document.addEventListener('DOMContentLoaded', function() {
-                // Replace WEBHOOK_ID with actual ID
-                const webhookId = window.location.pathname.split('/').pop();
-                document.querySelectorAll('script').forEach(script => {
-                    script.textContent = script.textContent.replace(/WEBHOOK_ID/g, webhookId);
-                });
-                
                 loadWebhookDetails();
                 document.getElementById('reprocess-btn').addEventListener('click', reprocessWebhook);
             });

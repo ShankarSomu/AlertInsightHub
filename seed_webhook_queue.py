@@ -27,27 +27,53 @@ dynamodb = boto3.resource(
 
 def seed_webhook_data():
     """Seed sample webhook data for the queue dashboard"""
-    # Check if tables exist
+    # Check if table exists
     existing_tables = [table.name for table in dynamodb.tables.all()]
-    if 'webhook_queue' not in existing_tables or 'postmark_data' not in existing_tables:
-        print("Required tables don't exist. Please run the main app first to create them.")
-        return
-    
-    webhook_queue = dynamodb.Table('webhook_queue')
-    postmark_data = dynamodb.Table('postmark_data')
+    if 'webhook_queue' not in existing_tables:
+        print("Creating webhook_queue table...")
+        webhook_queue = dynamodb.create_table(
+            TableName='webhook_queue',
+            KeySchema=[
+                {'AttributeName': 'id', 'KeyType': 'HASH'},
+            ],
+            AttributeDefinitions=[
+                {'AttributeName': 'id', 'AttributeType': 'S'},
+                {'AttributeName': 'status', 'AttributeType': 'S'},
+                {'AttributeName': 'timestamp', 'AttributeType': 'S'},
+                {'AttributeName': 'date', 'AttributeType': 'S'},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    'IndexName': 'status-timestamp-index',
+                    'KeySchema': [
+                        {'AttributeName': 'status', 'KeyType': 'HASH'},
+                        {'AttributeName': 'timestamp', 'KeyType': 'RANGE'}
+                    ],
+                    'Projection': {'ProjectionType': 'ALL'},
+                    'ProvisionedThroughput': {'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+                },
+                {
+                    'IndexName': 'date-index',
+                    'KeySchema': [
+                        {'AttributeName': 'date', 'KeyType': 'HASH'},
+                    ],
+                    'Projection': {'ProjectionType': 'ALL'},
+                    'ProvisionedThroughput': {'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+                }
+            ],
+            ProvisionedThroughput={'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+        )
+        # Wait for table to be created
+        webhook_queue.meta.client.get_waiter('table_exists').wait(TableName='webhook_queue')
+        print("webhook_queue table created successfully")
+    else:
+        webhook_queue = dynamodb.Table('webhook_queue')
     
     # Check if data already exists
     if webhook_queue.scan(Limit=1)['Items']:
         print("Data already exists in webhook_queue table. Clearing existing data...")
         scan = webhook_queue.scan()
         with webhook_queue.batch_writer() as batch:
-            for item in scan['Items']:
-                batch.delete_item(Key={'id': item['id']})
-    
-    if postmark_data.scan(Limit=1)['Items']:
-        print("Data already exists in postmark_data table. Clearing existing data...")
-        scan = postmark_data.scan()
-        with postmark_data.batch_writer() as batch:
             for item in scan['Items']:
                 batch.delete_item(Key={'id': item['id']})
     
@@ -75,14 +101,38 @@ def seed_webhook_data():
             # Determine status based on weights
             status = random.choices(statuses, weights=status_weights)[0]
             
-            # Create webhook queue item
+            # Create sample email data similar to Postmark webhook
+            email_data = {
+                "Date": timestamp.strftime("%a, %d %b %Y %H:%M:%S +0000"),
+                "From": f"sender{random.randint(1, 100)}@example.com",
+                "FromName": f"Sender {random.randint(1, 100)}",
+                "To": f"recipient{random.randint(1, 100)}@example.com",
+                "Subject": random.choice([
+                    "System notification",
+                    "Critical alert detected",
+                    "High CPU usage warning",
+                    "Database backup completed",
+                    "Security alert",
+                    "Scheduled maintenance"
+                ]),
+                "MessageID": f"message-{webhook_id[:8]}",
+                "TextBody": f"This is a sample webhook message body for {date_str}.",
+                "HtmlBody": f"<html><body><p>This is a sample webhook message body for {date_str}.</p></body></html>",
+                "Tag": random.choice(["alert", "notification", "system", "security"]),
+                "MessageStream": "outbound",
+                "Attachments": [],
+                "Headers": [{"Name": "X-Test-Header", "Value": "test-value"}]
+            }
+            
+            # Create webhook queue item with raw data included
             queue_item = {
                 "id": webhook_id,
                 "timestamp": timestamp_iso,
                 "date": date_str,
                 "status": status,
                 "source": "postmark",
-                "processed_at": timestamp_iso if status != "pending" else None
+                "processed_at": timestamp_iso if status != "pending" else None,
+                "raw_data": email_data  # Include raw data directly in the queue item
             }
             
             # Add error message for error status
@@ -94,37 +144,14 @@ def seed_webhook_data():
                     "Database connection error"
                 ])
             
-            # Create postmark data item with sample payload
-            payload = {
-                "MessageID": f"message-{webhook_id[:8]}",
-                "Subject": random.choice([
-                    "System notification",
-                    "Critical alert detected",
-                    "High CPU usage warning",
-                    "Database backup completed",
-                    "Security alert",
-                    "Scheduled maintenance"
-                ]),
-                "MessageStream": "outbound",
-                "Tag": random.choice(["alert", "notification", "system", "security"]),
-                "ServerID": random.randint(1000, 9999)
-            }
-            
-            postmark_item = {
-                "id": webhook_id,
-                "timestamp": timestamp_iso,
-                "date": date_str,
-                "raw_data": payload
-            }
-            
-            sample_data.append((queue_item, postmark_item))
+            sample_data.append(queue_item)
     
-    # Insert data into tables
+    # Insert data into table
     print(f"Inserting {len(sample_data)} sample webhook items...")
     
-    for queue_item, postmark_item in sample_data:
-        webhook_queue.put_item(Item=queue_item)
-        postmark_data.put_item(Item=postmark_item)
+    with webhook_queue.batch_writer() as batch:
+        for item in sample_data:
+            batch.put_item(Item=item)
     
     print("Sample webhook data inserted successfully")
 
