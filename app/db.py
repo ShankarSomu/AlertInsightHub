@@ -11,7 +11,10 @@ def get_dynamodb_client():
     if os.environ.get("AWS_ENDPOINT_URL"):
         return boto3.resource(
             'dynamodb',
-            endpoint_url=os.environ.get("AWS_ENDPOINT_URL", "http://localhost:8001")
+            endpoint_url=os.environ.get("AWS_ENDPOINT_URL", "http://localhost:8001"),
+            region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+            aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID", "fakeAccessKeyId"),
+            aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY", "fakeSecretAccessKey")
         )
     return boto3.resource('dynamodb')
 
