@@ -7,8 +7,8 @@ pip install -r /workspace/requirements.txt
 
 # Install DynamoDB Local
 echo "Installing DynamoDB Local..."
-mkdir -p /usr/local/dynamodb-local
-cd /usr/local/dynamodb-local
+mkdir -p ~/dynamodb-local
+cd ~/dynamodb-local
 
 if [ ! -f DynamoDBLocal.jar ]; then
   wget https://s3.us-west-2.amazonaws.com/dynamodb-local/dynamodb_local_latest.zip
