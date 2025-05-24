@@ -1,7 +1,8 @@
 {
   "name": "Alert Dashboard DevContainer",
   "build": {
-    "dockerfile": "Dockerfile"
+    "dockerfile": "Dockerfile",
+    "context": ".."
   },
   "forwardPorts": [8000, 8001],
   "postCreateCommand": "bash /usr/local/bin/install.sh",

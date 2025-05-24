@@ -8,6 +8,9 @@ RUN apt-get update && \
 # Set up workspace
 WORKDIR /workspace
 
+# Copy requirements.txt
+COPY app/requirements.txt /workspace/requirements.txt
+
 # Copy install script
-COPY install.sh /usr/local/bin/install.sh
+COPY .devcontainer/install.sh /usr/local/bin/install.sh
 RUN chmod +x /usr/local/bin/install.sh

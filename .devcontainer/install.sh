@@ -3,7 +3,7 @@ set -e
 
 # Install Python deps
 pip install --upgrade pip
-pip install -r /workspace/app/requirements.txt
+pip install -r /workspace/requirements.txt
 
 # Install DynamoDB Local
 echo "Installing DynamoDB Local..."
@@ -22,4 +22,3 @@ nohup java -Djava.library.path=./DynamoDBLocal_lib -jar DynamoDBLocal.jar -share
 # Start FastAPI app on port 8000
 cd /workspace
 nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 > /dev/null 2>&1 &
-
