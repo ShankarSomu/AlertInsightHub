@@ -3,7 +3,7 @@ set -e
 
 # Install Python deps
 pip install --upgrade pip
-pip install -r /workspace/requirements.txt
+pip install -r /workspaces/AlertInsightHub/requirements.txt
 
 # Install DynamoDB Local
 echo "Installing DynamoDB Local..."
@@ -23,23 +23,23 @@ nohup java -Djava.library.path=./DynamoDBLocal_lib -jar DynamoDBLocal.jar -share
 # Set environment variable for DynamoDB Local
 export AWS_ENDPOINT_URL=http://localhost:8001
 
-# Create a simple test script to verify connectivity
-cat > ~/test-connectivity.sh << 'EOL'
+# Create a startup script
+cat > ~/start-app.sh << 'EOL'
 #!/bin/bash
-echo "Testing connectivity..."
-echo "DynamoDB Local:"
-curl -s http://localhost:8001 || echo "Failed to connect to DynamoDB Local"
-echo ""
-echo "FastAPI:"
-curl -s http://localhost:8000 || echo "Failed to connect to FastAPI"
+cd /workspaces/AlertInsightHub
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 EOL
 
-chmod +x ~/test-connectivity.sh
+chmod +x ~/start-app.sh
 
 echo "DynamoDB Local started on port 8001"
-echo "FastAPI will start automatically in the terminal"
 echo ""
-echo "To test connectivity, run: ~/test-connectivity.sh"
+echo "To start the FastAPI application, run:"
+echo "~/start-app.sh"
+echo ""
+echo "Or manually with:"
+echo "cd /workspaces/AlertInsightHub"
+echo "python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 echo ""
 echo "Services:"
 echo "- DynamoDB Local: http://localhost:8001"

@@ -28,7 +28,13 @@ A FastAPI application that displays a dashboard for AWS cloud alert insights. Th
 
 1. Start the devcontainer in VS Code
 
-2. The application will be available at:
+2. Start the FastAPI application:
+   ```
+   cd /workspaces/AlertInsightHub
+   python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+   ```
+
+3. Access the application:
    - Dashboard: http://localhost:8000/
    - API docs: http://localhost:8000/docs
 

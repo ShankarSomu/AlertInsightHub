@@ -5,10 +5,6 @@
     "context": ".."
   },
   "forwardPorts": [8000, 8001],
-  "appPort": ["8000:8000", "8001:8001"],
   "postCreateCommand": "bash /usr/local/bin/install.sh",
-  "remoteUser": "vscode",
-  "postAttachCommand": {
-    "server": "cd /workspace && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
-  }
+  "remoteUser": "vscode"
 }
