@@ -17,8 +17,18 @@ if [ ! -f DynamoDBLocal.jar ]; then
 fi
 
 # Start DynamoDB Local on port 8001
-nohup java -Djava.library.path=./DynamoDBLocal_lib -jar DynamoDBLocal.jar -sharedDb -port 8001 > /dev/null 2>&1 &
+echo "Starting DynamoDB Local on port 8001..."
+nohup java -Djava.library.path=./DynamoDBLocal_lib -jar DynamoDBLocal.jar -sharedDb -port 8001 > dynamodb.log 2>&1 &
+
+# Set environment variable for DynamoDB Local
+export AWS_ENDPOINT_URL=http://localhost:8001
 
 # Start FastAPI app on port 8000
+echo "Starting FastAPI app on port 8000..."
 cd /workspace
-nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 > /dev/null 2>&1 &
+nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload > fastapi.log 2>&1 &
+
+echo "Services started:"
+echo "- DynamoDB Local: http://localhost:8001"
+echo "- FastAPI Dashboard: http://localhost:8000"
+echo "- API Documentation: http://localhost:8000/docs"
