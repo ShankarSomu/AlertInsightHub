@@ -119,6 +119,26 @@ def seed_sample_data():
             "severity": "medium",
             "timestamp": datetime.now().isoformat(),
             "message": "Moderate CPU utilization"
+        },
+        {
+            "id": str(uuid.uuid4()),
+            "account_id": "456789012345",
+            "service": "DynamoDB",
+            "resource_id": "users-table",
+            "alert_type": "Capacity",
+            "severity": "high",
+            "timestamp": datetime.now().isoformat(),
+            "message": "Provisioned capacity exceeded"
+        },
+        {
+            "id": str(uuid.uuid4()),
+            "account_id": "456789012345",
+            "service": "S3",
+            "resource_id": "data-bucket",
+            "alert_type": "Size",
+            "severity": "medium",
+            "timestamp": datetime.now().isoformat(),
+            "message": "Bucket size growing rapidly"
         }
     ]
     
@@ -379,6 +399,224 @@ def get_filtered_alerts(account_id: str, service: str, region: str, severity: st
     except Exception as e:
         print(f"Error in get_filtered_alerts: {e}")
         return []
+
+def get_webhook_queue_items(status=None, date=None, limit=50):
+    """Get webhook queue items, optionally filtered by status and/or date"""
+    dynamodb = get_dynamodb_client()
+    
+    # Check if table exists and create it if it doesn't
+    existing_tables = [table.name for table in dynamodb.tables.all()]
+    if 'webhook_queue' not in existing_tables:
+        print("Creating webhook_queue table as it doesn't exist")
+        queue_table = dynamodb.create_table(
+            TableName='webhook_queue',
+            KeySchema=[
+                {'AttributeName': 'id', 'KeyType': 'HASH'},
+            ],
+            AttributeDefinitions=[
+                {'AttributeName': 'id', 'AttributeType': 'S'},
+                {'AttributeName': 'status', 'AttributeType': 'S'},
+                {'AttributeName': 'timestamp', 'AttributeType': 'S'},
+                {'AttributeName': 'date', 'AttributeType': 'S'},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    'IndexName': 'status-timestamp-index',
+                    'KeySchema': [
+                        {'AttributeName': 'status', 'KeyType': 'HASH'},
+                        {'AttributeName': 'timestamp', 'KeyType': 'RANGE'}
+                    ],
+                    'Projection': {'ProjectionType': 'ALL'},
+                    'ProvisionedThroughput': {'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+                },
+                {
+                    'IndexName': 'date-index',
+                    'KeySchema': [
+                        {'AttributeName': 'date', 'KeyType': 'HASH'},
+                    ],
+                    'Projection': {'ProjectionType': 'ALL'},
+                    'ProvisionedThroughput': {'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+                }
+            ],
+            ProvisionedThroughput={'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+        )
+        # Wait for table to be created
+        queue_table.meta.client.get_waiter('table_exists').wait(TableName='webhook_queue')
+        print("webhook_queue table created successfully")
+    
+    # Also check for postmark_data table
+    if 'postmark_data' not in existing_tables:
+        print("Creating postmark_data table as it doesn't exist")
+        postmark_table = dynamodb.create_table(
+            TableName='postmark_data',
+            KeySchema=[
+                {'AttributeName': 'id', 'KeyType': 'HASH'},
+            ],
+            AttributeDefinitions=[
+                {'AttributeName': 'id', 'AttributeType': 'S'},
+                {'AttributeName': 'date', 'AttributeType': 'S'},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    'IndexName': 'date-index',
+                    'KeySchema': [
+                        {'AttributeName': 'date', 'KeyType': 'HASH'},
+                    ],
+                    'Projection': {'ProjectionType': 'ALL'},
+                    'ProvisionedThroughput': {'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+                }
+            ],
+            ProvisionedThroughput={'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+        )
+        # Wait for table to be created
+        postmark_table.meta.client.get_waiter('table_exists').wait(TableName='postmark_data')
+        print("postmark_data table created successfully")
+    
+    table = dynamodb.Table('webhook_queue')
+    
+    try:
+        # Use scan instead of query for simplicity and to avoid index issues
+        if status and date:
+            # Filter by both status and date
+            response = table.scan(
+                FilterExpression='#status = :status AND #date = :date',
+                ExpressionAttributeNames={'#status': 'status', '#date': 'date'},
+                ExpressionAttributeValues={':status': status, ':date': date},
+                Limit=limit
+            )
+        elif status:
+            # Filter by status only
+            response = table.scan(
+                FilterExpression='#status = :status',
+                ExpressionAttributeNames={'#status': 'status'},
+                ExpressionAttributeValues={':status': status},
+                Limit=limit
+            )
+        elif date:
+            # Filter by date only
+            response = table.scan(
+                FilterExpression='#date = :date',
+                ExpressionAttributeNames={'#date': 'date'},
+                ExpressionAttributeValues={':date': date},
+                Limit=limit
+            )
+        else:
+            # Scan all items
+            response = table.scan(Limit=limit)
+        
+        return response['Items']
+    except Exception as e:
+        print(f"Error in get_webhook_queue_items: {e}")
+        return []
+
+def update_webhook_status(webhook_id, status, error_message=None):
+    """Update the status of a webhook queue item"""
+    dynamodb = get_dynamodb_client()
+    table = dynamodb.Table('webhook_queue')
+    
+    try:
+        update_expr = "SET #status = :status, processed_at = :processed_at"
+        expr_attr_values = {
+            ':status': status,
+            ':processed_at': datetime.now().isoformat()
+        }
+        
+        if error_message:
+            update_expr += ", error_message = :error"
+            expr_attr_values[':error'] = error_message
+        
+        table.update_item(
+            Key={'id': webhook_id},
+            UpdateExpression=update_expr,
+            ExpressionAttributeNames={'#status': 'status'},
+            ExpressionAttributeValues=expr_attr_values
+        )
+        
+        return True
+    except Exception as e:
+        print(f"Error updating webhook status: {e}")
+        return False
+
+def get_webhook_stats(date=None):
+    """Get webhook queue statistics, optionally filtered by date"""
+    dynamodb = get_dynamodb_client()
+    
+    # Check if table exists first
+    existing_tables = [table.name for table in dynamodb.tables.all()]
+    if 'webhook_queue' not in existing_tables:
+        print("webhook_queue table doesn't exist for stats")
+        return {
+            'total': 0,
+            'pending': 0,
+            'processed': 0,
+            'error': 0,
+            'dates': {}
+        }
+    
+    table = dynamodb.Table('webhook_queue')
+    
+    try:
+        # Use scan instead of query for simplicity
+        if date:
+            response = table.scan(
+                FilterExpression='#date = :date',
+                ExpressionAttributeNames={'#date': 'date'},
+                ExpressionAttributeValues={':date': date}
+            )
+        else:
+            # Scan all items
+            response = table.scan()
+        
+        items = response['Items']
+        
+        # Calculate statistics
+        stats = {
+            'total': len(items),
+            'pending': 0,
+            'processed': 0,
+            'error': 0,
+            'dates': {}
+        }
+        
+        for item in items:
+            status = item.get('status', 'unknown')
+            item_date = item.get('date', 'unknown')
+            
+            # Update overall counts
+            if status == 'pending':
+                stats['pending'] += 1
+            elif status == 'processed':
+                stats['processed'] += 1
+            elif status == 'error':
+                stats['error'] += 1
+            
+            # Update date-specific counts
+            if item_date not in stats['dates']:
+                stats['dates'][item_date] = {
+                    'total': 0,
+                    'pending': 0,
+                    'processed': 0,
+                    'error': 0
+                }
+            
+            stats['dates'][item_date]['total'] += 1
+            if status == 'pending':
+                stats['dates'][item_date]['pending'] += 1
+            elif status == 'processed':
+                stats['dates'][item_date]['processed'] += 1
+            elif status == 'error':
+                stats['dates'][item_date]['error'] += 1
+        
+        return stats
+    except Exception as e:
+        print(f"Error in get_webhook_stats: {e}")
+        return {
+            'total': 0,
+            'pending': 0,
+            'processed': 0,
+            'error': 0,
+            'dates': {}
+        }
 
 def get_remediation_action(service: str, alert_type: str, severity: str):
     """Get remediation recommendations based on service, alert type and severity"""

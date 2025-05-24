@@ -59,6 +59,71 @@ def create_table():
         print("Table created:", table.table_name)
     else:
         print("Table 'alerts' already exists")
+    
+    # Create postmark data table
+    if 'postmark_data' not in existing_tables:
+        postmark_table = dynamodb.create_table(
+            TableName='postmark_data',
+            KeySchema=[
+                {'AttributeName': 'id', 'KeyType': 'HASH'},
+            ],
+            AttributeDefinitions=[
+                {'AttributeName': 'id', 'AttributeType': 'S'},
+                {'AttributeName': 'date', 'AttributeType': 'S'},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    'IndexName': 'date-index',
+                    'KeySchema': [
+                        {'AttributeName': 'date', 'KeyType': 'HASH'},
+                    ],
+                    'Projection': {'ProjectionType': 'ALL'},
+                    'ProvisionedThroughput': {'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+                }
+            ],
+            ProvisionedThroughput={'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+        )
+        print("Table created:", postmark_table.table_name)
+    else:
+        print("Table 'postmark_data' already exists")
+    
+    # Create webhook queue table
+    if 'webhook_queue' not in existing_tables:
+        queue_table = dynamodb.create_table(
+            TableName='webhook_queue',
+            KeySchema=[
+                {'AttributeName': 'id', 'KeyType': 'HASH'},
+            ],
+            AttributeDefinitions=[
+                {'AttributeName': 'id', 'AttributeType': 'S'},
+                {'AttributeName': 'status', 'AttributeType': 'S'},
+                {'AttributeName': 'timestamp', 'AttributeType': 'S'},
+                {'AttributeName': 'date', 'AttributeType': 'S'},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    'IndexName': 'status-timestamp-index',
+                    'KeySchema': [
+                        {'AttributeName': 'status', 'KeyType': 'HASH'},
+                        {'AttributeName': 'timestamp', 'KeyType': 'RANGE'}
+                    ],
+                    'Projection': {'ProjectionType': 'ALL'},
+                    'ProvisionedThroughput': {'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+                },
+                {
+                    'IndexName': 'date-index',
+                    'KeySchema': [
+                        {'AttributeName': 'date', 'KeyType': 'HASH'},
+                    ],
+                    'Projection': {'ProjectionType': 'ALL'},
+                    'ProvisionedThroughput': {'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+                }
+            ],
+            ProvisionedThroughput={'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+        )
+        print("Table created:", queue_table.table_name)
+    else:
+        print("Table 'webhook_queue' already exists")
 
 # Generate sample data
 def generate_sample_data():
