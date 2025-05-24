@@ -35,8 +35,15 @@ app.add_middleware(
 async def startup_event():
     logger.info("Initializing database...")
     try:
+        # Set AWS environment variables for DynamoDB Local
+        os.environ["AWS_ENDPOINT_URL"] = "http://localhost:8001"
+        os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
+        os.environ["AWS_ACCESS_KEY_ID"] = "fakeAccessKeyId"
+        os.environ["AWS_SECRET_ACCESS_KEY"] = "fakeSecretAccessKey"
+        
         db.create_tables()
-        db.seed_sample_data()
+        # Comment out the seed_sample_data call if you're using the external seed_data.py script
+        # db.seed_sample_data()
         logger.info("Database initialization complete")
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
@@ -56,27 +63,75 @@ async def get_dashboard():
             h1 { color: #333; }
             table { border-collapse: collapse; width: 100%; }
             th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-            th { background-color: #f2f2f2; }
+            th { background-color: #f2f2f2; cursor: pointer; position: relative; }
+            th:hover { background-color: #e0e0e0; }
+            th:after { content: ""; position: absolute; right: 8px; top: 50%; transform: translateY(-50%); }
+            th.sort-asc:after { content: "▲"; }
+            th.sort-desc:after { content: "▼"; }
             tr:hover { background-color: #f5f5f5; }
             .medium { color: #ff9900; }
             .high { color: #ff6600; }
             .critical { color: #cc0000; }
-            #details, #resource-details { margin-top: 20px; display: none; }
+            .summary-alert, .resource-alert, .alert-detail { cursor: pointer; }
+            .clickable { position: relative; }
+            .clickable:after { content: "👆"; font-size: 10px; position: absolute; top: 0; right: 0; opacity: 0.5; }
+            #details, #resource-details, #alert-details { margin-top: 20px; display: none; }
+            .modal { display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4); }
+            .modal-content { background-color: #fefefe; margin: 15% auto; padding: 20px; border: 1px solid #888; width: 80%; max-height: 70vh; overflow-y: auto; }
+            .close { color: #aaa; float: right; font-size: 28px; font-weight: bold; cursor: pointer; }
+            .close:hover { color: black; }
+            .remediation { background-color: #f8f8f8; padding: 10px; border-left: 4px solid #4CAF50; margin-top: 10px; }
+            .help-text { background-color: #e9f7fe; padding: 10px; border-radius: 4px; margin-bottom: 15px; }
+            .filter-controls { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 15px; background-color: #f9f9f9; padding: 10px; border-radius: 4px; }
+            .filter-group { display: flex; align-items: center; gap: 5px; }
+            select { padding: 5px; border-radius: 3px; border: 1px solid #ddd; }
+            label { font-weight: bold; }
         </style>
     </head>
     <body>
         <h1>AWS Alert Insight Hub</h1>
         
+        <div class="help-text">
+            <p><strong>Tips:</strong> 
+                Use the filters to focus on specific accounts, services, or regions.
+                Click on column headers to sort the table.
+                Click on service names to view resources. 
+                Click on alert numbers to view details. 
+                Hold <kbd>Shift</kbd> and click on a severity number to see all alerts of that severity.
+            </p>
+        </div>
+        
         <h2>Account & Service Summary</h2>
+        <div class="filter-controls">
+            <div class="filter-group">
+                <label for="account-filter">Account:</label>
+                <select id="account-filter">
+                    <option value="all">All Accounts</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label for="service-filter">Service:</label>
+                <select id="service-filter">
+                    <option value="all">All Services</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label for="region-filter">Region:</label>
+                <select id="region-filter">
+                    <option value="all">All Regions</option>
+                </select>
+            </div>
+        </div>
         <table id="summary-table">
             <thead>
                 <tr>
-                    <th>Account ID</th>
-                    <th>Service</th>
-                    <th>Total Alerts</th>
-                    <th>Medium</th>
-                    <th>High</th>
-                    <th>Critical</th>
+                    <th data-sort="account">Account ID ▲▼</th>
+                    <th data-sort="service">Service ▲▼</th>
+                    <th data-sort="region">Region ▲▼</th>
+                    <th data-sort="total">Total Alerts ▲▼</th>
+                    <th data-sort="medium">Medium ▲▼</th>
+                    <th data-sort="high">High ▲▼</th>
+                    <th data-sort="critical">Critical ▲▼</th>
                 </tr>
             </thead>
             <tbody id="summary-body"></tbody>
@@ -114,43 +169,322 @@ async def get_dashboard():
             </table>
         </div>
         
+        <!-- Alert Details Modal -->
+        <div id="alert-modal" class="modal">
+            <div class="modal-content">
+                <span class="close">&times;</span>
+                <h2 id="alert-modal-title">Alert Details</h2>
+                <div id="alert-modal-content"></div>
+            </div>
+        </div>
+        
         <script>
+            // Global variables to track current context
+            let currentResourceId = '';
+            let currentAlertType = '';
+            
+            // Modal elements
+            const modal = document.getElementById('alert-modal');
+            const modalClose = document.querySelector('.close');
+            const modalTitle = document.getElementById('alert-modal-title');
+            const modalContent = document.getElementById('alert-modal-content');
+            
+            // Function to show all alerts of a specific severity
+            function showAllSeverityAlerts(severity) {
+                fetch(`/api/summary/${severity}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.length === 0) {
+                            modalTitle.textContent = 'No Alerts Found';
+                            modalContent.innerHTML = '<p>No alerts match the selected severity.</p>';
+                        } else {
+                            modalTitle.textContent = `All ${severity.charAt(0).toUpperCase() + severity.slice(1)} Severity Alerts`;
+                            
+                            // Group alerts by service
+                            const serviceGroups = {};
+                            data.forEach(alert => {
+                                if (!serviceGroups[alert.service]) {
+                                    serviceGroups[alert.service] = [];
+                                }
+                                serviceGroups[alert.service].push(alert);
+                            });
+                            
+                            let content = '';
+                            Object.keys(serviceGroups).sort().forEach(service => {
+                                content += `<h3>${service} Service</h3>`;
+                                
+                                serviceGroups[service].forEach((alert, index) => {
+                                    const timestamp = new Date(alert.timestamp).toLocaleString();
+                                    content += `
+                                        <div style="margin-bottom: 20px; ${index > 0 ? 'border-top: 1px solid #eee; padding-top: 15px;' : ''}">
+                                            <p><strong>Resource:</strong> ${alert.resource_id}</p>
+                                            <p><strong>Alert Type:</strong> ${alert.alert_type}</p>
+                                            <p><strong>Timestamp:</strong> ${timestamp}</p>
+                                            <p><strong>Message:</strong> ${alert.message}</p>
+                                            <div class="remediation">
+                                                <h4>Recommended Action:</h4>
+                                                <p>${alert.remediation}</p>
+                                            </div>
+                                        </div>
+                                    `;
+                                });
+                            });
+                            
+                            modalContent.innerHTML = content;
+                        }
+                        
+                        modal.style.display = 'block';
+                    })
+                    .catch(error => {
+                        modalTitle.textContent = 'Error';
+                        modalContent.innerHTML = `<p>Failed to load alert details: ${error.message}</p>`;
+                        modal.style.display = 'block';
+                    });
+            }
+            
+            // Close modal when clicking X
+            modalClose.onclick = function() {
+                modal.style.display = 'none';
+            }
+            
+            // Close modal when clicking outside
+            window.onclick = function(event) {
+                if (event.target == modal) {
+                    modal.style.display = 'none';
+                }
+            }
+            
+            // Global variables for data and filters
+            let summaryData = [];
+            let accounts = new Set();
+            let services = new Set();
+            let regions = new Set();
+            let currentSortField = 'account';
+            let currentSortOrder = 'asc';
+            
             // Load summary data
             fetch('/api/summary')
                 .then(response => response.json())
                 .then(data => {
-                    const tbody = document.getElementById('summary-body');
+                    summaryData = data;
+                    
+                    // Extract unique accounts, services, and regions for filters
                     data.forEach(item => {
-                        const row = document.createElement('tr');
-                        row.innerHTML = `
-                            <td>${item.account_id}</td>
-                            <td><a href="#" class="service-link" data-account="${item.account_id}" data-service="${item.service}">${item.service}</a></td>
-                            <td>${item.total_alerts}</td>
-                            <td class="medium">${item.medium_alerts}</td>
-                            <td class="high">${item.high_alerts}</td>
-                            <td class="critical">${item.critical_alerts}</td>
-                        `;
-                        tbody.appendChild(row);
+                        accounts.add(item.account_id);
+                        services.add(item.service);
+                        regions.add(item.region || 'us-east-1');
                     });
                     
-                    // Add event listeners to service links
-                    document.querySelectorAll('.service-link').forEach(link => {
-                        link.addEventListener('click', function(e) {
-                            e.preventDefault();
-                            const accountId = this.getAttribute('data-account');
-                            const service = this.getAttribute('data-service');
-                            loadResourceData(accountId, service);
+                    // Populate filter dropdowns
+                    const accountFilter = document.getElementById('account-filter');
+                    Array.from(accounts).sort().forEach(account => {
+                        const option = document.createElement('option');
+                        option.value = account;
+                        option.textContent = account;
+                        accountFilter.appendChild(option);
+                    });
+                    
+                    const serviceFilter = document.getElementById('service-filter');
+                    Array.from(services).sort().forEach(service => {
+                        const option = document.createElement('option');
+                        option.value = service;
+                        option.textContent = service;
+                        serviceFilter.appendChild(option);
+                    });
+                    
+                    const regionFilter = document.getElementById('region-filter');
+                    Array.from(regions).sort().forEach(region => {
+                        const option = document.createElement('option');
+                        option.value = region;
+                        option.textContent = region;
+                        regionFilter.appendChild(option);
+                    });
+                    
+                    // Initial render
+                    renderSummaryTable(data);
+                    
+                    // Set up event listeners for filters
+                    document.getElementById('account-filter').addEventListener('change', applyFilters);
+                    document.getElementById('service-filter').addEventListener('change', applyFilters);
+                    document.getElementById('region-filter').addEventListener('change', applyFilters);
+                    
+                    // Add click handlers for table headers
+                    document.querySelectorAll('#summary-table th[data-sort]').forEach(header => {
+                        header.addEventListener('click', function() {
+                            const sortField = this.getAttribute('data-sort');
+                            if (currentSortField === sortField) {
+                                // Toggle sort order if clicking the same header
+                                currentSortOrder = currentSortOrder === 'asc' ? 'desc' : 'asc';
+                            } else {
+                                // Set new sort field
+                                currentSortField = sortField;
+                                currentSortOrder = 'asc';
+                            }
+                            
+                            // Update header styles
+                            document.querySelectorAll('#summary-table th').forEach(th => {
+                                th.classList.remove('sort-asc', 'sort-desc');
+                            });
+                            this.classList.add(currentSortOrder === 'asc' ? 'sort-asc' : 'sort-desc');
+                            
+                            applyFilters();
                         });
                     });
                 });
                 
+            // Function to render the summary table with filtered and sorted data
+            function renderSummaryTable(data) {
+                const tbody = document.getElementById('summary-body');
+                tbody.innerHTML = '';
+                
+                // Update sort indicators on headers
+                document.querySelectorAll('#summary-table th[data-sort]').forEach(header => {
+                    header.classList.remove('sort-asc', 'sort-desc');
+                    if (header.getAttribute('data-sort') === currentSortField) {
+                        header.classList.add(currentSortOrder === 'asc' ? 'sort-asc' : 'sort-desc');
+                    }
+                });
+                
+                data.forEach(item => {
+                    const row = document.createElement('tr');
+                    const region = item.region || 'us-east-1';
+                    row.innerHTML = `
+                        <td>${item.account_id}</td>
+                        <td><a href="#" class="service-link" data-account="${item.account_id}" data-service="${item.service}" data-region="${region}">${item.service}</a></td>
+                        <td>${region}</td>
+                        <td>${item.total_alerts}</td>
+                        <td class="medium summary-alert" data-account="${item.account_id}" data-service="${item.service}" data-region="${region}" data-severity="medium">${item.medium_alerts}</td>
+                        <td class="high summary-alert" data-account="${item.account_id}" data-service="${item.service}" data-region="${region}" data-severity="high">${item.high_alerts}</td>
+                        <td class="critical summary-alert" data-account="${item.account_id}" data-service="${item.service}" data-region="${region}" data-severity="critical">${item.critical_alerts}</td>
+                    `;
+                    tbody.appendChild(row);
+                });
+                
+                // Add event listeners to service links
+                document.querySelectorAll('.service-link').forEach(link => {
+                    link.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        const accountId = this.getAttribute('data-account');
+                        const service = this.getAttribute('data-service');
+                        const region = this.getAttribute('data-region');
+                        loadResourceData(accountId, service, null, region);
+                    });
+                });
+                
+                // Add event listeners to summary alert numbers
+                document.querySelectorAll('.summary-alert').forEach(cell => {
+                    if (parseInt(cell.textContent) > 0) {
+                        cell.style.cursor = 'pointer';
+                        cell.addEventListener('click', function(e) {
+                            // If Shift key is pressed, show all alerts of this severity
+                            if (e.shiftKey) {
+                                const severity = this.getAttribute('data-severity');
+                                showAllSeverityAlerts(severity);
+                            } else {
+                                // Normal click - drill down to resources
+                                const accountId = this.getAttribute('data-account');
+                                const service = this.getAttribute('data-service');
+                                const severity = this.getAttribute('data-severity');
+                                const region = this.getAttribute('data-region');
+                                loadResourceData(accountId, service, severity, region);
+                            }
+                        });
+                    }
+                });
+            }
+            
+            // Function to apply filters and sorting
+            function applyFilters() {
+                const accountFilter = document.getElementById('account-filter').value;
+                const serviceFilter = document.getElementById('service-filter').value;
+                const regionFilter = document.getElementById('region-filter').value;
+                
+                // Filter data
+                let filteredData = summaryData.filter(item => {
+                    const itemRegion = item.region || 'us-east-1';
+                    return (accountFilter === 'all' || item.account_id === accountFilter) &&
+                           (serviceFilter === 'all' || item.service === serviceFilter) &&
+                           (regionFilter === 'all' || itemRegion === regionFilter);
+                });
+                
+                // Sort data
+                filteredData.sort((a, b) => {
+                    let valueA, valueB;
+                    
+                    switch(currentSortField) {
+                        case 'account':
+                            valueA = a.account_id;
+                            valueB = b.account_id;
+                            break;
+                        case 'service':
+                            valueA = a.service;
+                            valueB = b.service;
+                            break;
+                        case 'region':
+                            valueA = a.region || 'us-east-1';
+                            valueB = b.region || 'us-east-1';
+                            break;
+                        case 'total':
+                            valueA = a.total_alerts;
+                            valueB = b.total_alerts;
+                            break;
+                        case 'medium':
+                            valueA = a.medium_alerts;
+                            valueB = b.medium_alerts;
+                            break;
+                        case 'high':
+                            valueA = a.high_alerts;
+                            valueB = b.high_alerts;
+                            break;
+                        case 'critical':
+                            valueA = a.critical_alerts;
+                            valueB = b.critical_alerts;
+                            break;
+                        default:
+                            valueA = a.account_id;
+                            valueB = b.account_id;
+                    }
+                    
+                    // For string comparison
+                    if (typeof valueA === 'string') {
+                        if (currentSortOrder === 'asc') {
+                            return valueA.localeCompare(valueB);
+                        } else {
+                            return valueB.localeCompare(valueA);
+                        }
+                    } 
+                    // For number comparison
+                    else {
+                        if (currentSortOrder === 'asc') {
+                            return valueA - valueB;
+                        } else {
+                            return valueB - valueA;
+                        }
+                    }
+                });
+                
+                // Render the filtered and sorted data
+                renderSummaryTable(filteredData);
+            }
+                });
+                
             // Load resource data for a service
-            function loadResourceData(accountId, service) {
+            function loadResourceData(accountId, service, highlightSeverity = null, region = null) {
                 document.getElementById('details').style.display = 'block';
                 document.getElementById('resource-details').style.display = 'none';
-                document.getElementById('service-title').textContent = `${service} Resources for Account ${accountId}`;
                 
-                fetch(`/api/service/${accountId}/${service}`)
+                let title = `${service} Resources for Account ${accountId}`;
+                if (region) {
+                    title += ` in ${region}`;
+                }
+                document.getElementById('service-title').textContent = title;
+                
+                let url = `/api/service/${accountId}/${service}`;
+                if (region) {
+                    url += `?region=${region}`;
+                }
+                
+                fetch(url)
                     .then(response => response.json())
                     .then(data => {
                         const tbody = document.getElementById('resources-body');
@@ -160,9 +494,9 @@ async def get_dashboard():
                             row.innerHTML = `
                                 <td><a href="#" class="resource-link" data-resource="${item.resource_id}">${item.resource_id}</a></td>
                                 <td>${item.total_alerts}</td>
-                                <td class="medium">${item.medium_alerts}</td>
-                                <td class="high">${item.high_alerts}</td>
-                                <td class="critical">${item.critical_alerts}</td>
+                                <td class="medium resource-alert" data-resource="${item.resource_id}" data-severity="medium">${item.medium_alerts}</td>
+                                <td class="high resource-alert" data-resource="${item.resource_id}" data-severity="high">${item.high_alerts}</td>
+                                <td class="critical resource-alert" data-resource="${item.resource_id}" data-severity="critical">${item.critical_alerts}</td>
                             `;
                             tbody.appendChild(row);
                         });
@@ -175,13 +509,34 @@ async def get_dashboard():
                                 loadAlertData(resourceId);
                             });
                         });
+                        
+                        // Add event listeners to resource alert numbers
+                        document.querySelectorAll('.resource-alert').forEach(cell => {
+                            if (parseInt(cell.textContent) > 0) {
+                                cell.style.cursor = 'pointer';
+                                cell.addEventListener('click', function() {
+                                    const resourceId = this.getAttribute('data-resource');
+                                    loadAlertData(resourceId, this.getAttribute('data-severity'));
+                                });
+                            }
+                        });
+                        
+                        // If a specific severity was clicked in the summary, highlight those cells
+                        if (highlightSeverity) {
+                            document.querySelectorAll(`.resource-alert[data-severity="${highlightSeverity}"]`).forEach(cell => {
+                                if (parseInt(cell.textContent) > 0) {
+                                    cell.style.backgroundColor = '#fffacd'; // Light yellow highlight
+                                }
+                            });
+                        }
                     });
             }
             
             // Load alert data for a resource
-            function loadAlertData(resourceId) {
+            function loadAlertData(resourceId, highlightSeverity = null) {
                 document.getElementById('resource-details').style.display = 'block';
                 document.getElementById('resource-title').textContent = `Alert Types for Resource ${resourceId}`;
+                currentResourceId = resourceId;
                 
                 fetch(`/api/resource/${resourceId}`)
                     .then(response => response.json())
@@ -193,12 +548,81 @@ async def get_dashboard():
                             row.innerHTML = `
                                 <td>${item.alert_type}</td>
                                 <td>${item.total_alerts}</td>
-                                <td class="medium">${item.medium_alerts}</td>
-                                <td class="high">${item.high_alerts}</td>
-                                <td class="critical">${item.critical_alerts}</td>
+                                <td class="medium alert-detail" data-type="${item.alert_type}" data-severity="medium">${item.medium_alerts}</td>
+                                <td class="high alert-detail" data-type="${item.alert_type}" data-severity="high">${item.high_alerts}</td>
+                                <td class="critical alert-detail" data-type="${item.alert_type}" data-severity="critical">${item.critical_alerts}</td>
                             `;
                             tbody.appendChild(row);
                         });
+                        
+                        // Add event listeners to severity cells
+                        document.querySelectorAll('.alert-detail').forEach(cell => {
+                            if (parseInt(cell.textContent) > 0) {
+                                cell.style.cursor = 'pointer';
+                                cell.addEventListener('click', function() {
+                                    const alertType = this.getAttribute('data-type');
+                                    const severity = this.getAttribute('data-severity');
+                                    showAlertDetails(currentResourceId, alertType, severity);
+                                });
+                            }
+                        });
+                        
+                        // If a specific severity was clicked in the resources view, highlight those cells and show details
+                        if (highlightSeverity) {
+                            document.querySelectorAll(`.alert-detail[data-severity="${highlightSeverity}"]`).forEach(cell => {
+                                if (parseInt(cell.textContent) > 0) {
+                                    cell.style.backgroundColor = '#fffacd'; // Light yellow highlight
+                                    
+                                    // Automatically show details for the first highlighted alert type with this severity
+                                    if (data.some(item => item[`${highlightSeverity}_alerts`] > 0)) {
+                                        const firstAlertType = data.find(item => item[`${highlightSeverity}_alerts`] > 0).alert_type;
+                                        setTimeout(() => {
+                                            showAlertDetails(resourceId, firstAlertType, highlightSeverity);
+                                        }, 500);
+                                    }
+                                }
+                            });
+                        }
+                    });
+            }
+            
+            // Show alert details with remediation actions
+            function showAlertDetails(resourceId, alertType, severity) {
+                fetch(`/api/alerts/${resourceId}/${alertType}/${severity}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.length === 0) {
+                            modalTitle.textContent = 'No Alerts Found';
+                            modalContent.innerHTML = '<p>No alerts match the selected criteria.</p>';
+                        } else {
+                            modalTitle.textContent = `${severity.charAt(0).toUpperCase() + severity.slice(1)} ${alertType} Alerts for ${resourceId}`;
+                            
+                            let content = '';
+                            data.forEach((alert, index) => {
+                                const timestamp = new Date(alert.timestamp).toLocaleString();
+                                content += `
+                                    <div style="margin-bottom: 20px; ${index > 0 ? 'border-top: 1px solid #eee; padding-top: 15px;' : ''}">
+                                        <p><strong>Alert ID:</strong> ${alert.id}</p>
+                                        <p><strong>Service:</strong> ${alert.service}</p>
+                                        <p><strong>Timestamp:</strong> ${timestamp}</p>
+                                        <p><strong>Message:</strong> ${alert.message}</p>
+                                        <div class="remediation">
+                                            <h4>Recommended Action:</h4>
+                                            <p>${alert.remediation}</p>
+                                        </div>
+                                    </div>
+                                `;
+                            });
+                            
+                            modalContent.innerHTML = content;
+                        }
+                        
+                        modal.style.display = 'block';
+                    })
+                    .catch(error => {
+                        modalTitle.textContent = 'Error';
+                        modalContent.innerHTML = `<p>Failed to load alert details: ${error.message}</p>`;
+                        modal.style.display = 'block';
                     });
             }
         </script>
@@ -218,13 +642,23 @@ async def get_summary():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/service/{account_id}/{service}", response_model=list[ResourceSummary])
-async def get_service_resources(account_id: str, service: str):
+async def get_service_resources(account_id: str, service: str, region: str = None):
     """Get resources for a specific account and service with alert counts"""
     try:
-        logger.info(f"Fetching resources for account {account_id}, service {service}")
-        return db.get_service_resources(account_id, service)
+        logger.info(f"Fetching resources for account {account_id}, service {service}, region {region}")
+        return db.get_service_resources(account_id, service, region)
     except Exception as e:
         logger.error(f"Error fetching service resources: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/summary/{severity}")
+async def get_summary_by_severity(severity: str):
+    """Get all alerts of a specific severity across all accounts and services"""
+    try:
+        logger.info(f"Fetching all {severity} alerts")
+        return db.get_alerts_by_severity(severity)
+    except Exception as e:
+        logger.error(f"Error fetching alerts by severity: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/resource/{resource_id}", response_model=list[AlertTypeSummary])
@@ -235,6 +669,16 @@ async def get_resource_alerts(resource_id: str):
         return db.get_resource_alerts(resource_id)
     except Exception as e:
         logger.error(f"Error fetching resource alerts: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/alerts/{resource_id}/{alert_type}/{severity}")
+async def get_alert_details(resource_id: str, alert_type: str, severity: str):
+    """Get detailed information about specific alerts including remediation actions"""
+    try:
+        logger.info(f"Fetching alert details for resource {resource_id}, type {alert_type}, severity {severity}")
+        return db.get_alert_details(resource_id, alert_type, severity)
+    except Exception as e:
+        logger.error(f"Error fetching alert details: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

@@ -65,6 +65,7 @@ def generate_sample_data():
     # Sample data configuration
     accounts = ["111111111111", "222222222222", "333333333333"]
     services = ["EC2", "RDS", "Lambda", "S3", "DynamoDB"]
+    regions = ["us-east-1", "us-west-2", "eu-west-1", "ap-southeast-1"]
     
     resources = {
         "EC2": ["i-08abcd12345ef6789", "i-09efgh67890ab1234", "i-07ijkl56789mn0123"],
@@ -97,6 +98,7 @@ def generate_sample_data():
                 resource = random.choice(resources[service])
                 alert_type = random.choice(alert_types[service])
                 severity = random.choice(severities)
+                region = random.choice(regions)
                 
                 # Generate a random timestamp within the last 7 days
                 random_days = random.randint(0, 7)
@@ -112,7 +114,8 @@ def generate_sample_data():
                     "alert_type": alert_type,
                     "severity": severity,
                     "timestamp": timestamp.isoformat(),
-                    "message": f"{severity.capitalize()} {alert_type} alert for {service} resource {resource}"
+                    "message": f"{severity.capitalize()} {alert_type} alert for {service} resource {resource}",
+                    "region": region
                 }
                 
                 alerts.append(alert)
