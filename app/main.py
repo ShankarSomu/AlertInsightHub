@@ -477,7 +477,6 @@ async def get_dashboard():
                 // Render the filtered and sorted data
                 renderSummaryTable(filteredData);
             }
-                });
                 
             // Load resource data for a service
             function loadResourceData(accountId, service, highlightSeverity = null, region = null) {
