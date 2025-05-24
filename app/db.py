@@ -134,36 +134,45 @@ def get_account_service_summary():
     dynamodb = get_dynamodb_client()
     table = dynamodb.Table('alerts')
     
-    response = table.scan()
-    items = response['Items']
-    
-    # Process items to create summary
-    summary = {}
-    for item in items:
-        # Include region in the key
-        region = item.get('region', 'us-east-1')
-        key = (item['account_id'], item['service'], region)
-        if key not in summary:
-            summary[key] = {
-                'account_id': item['account_id'],
-                'service': item['service'],
-                'region': region,
-                'total_alerts': 0,
-                'medium_alerts': 0,
-                'high_alerts': 0,
-                'critical_alerts': 0
-            }
+    try:
+        response = table.scan()
+        items = response['Items']
         
-        summary[key]['total_alerts'] += 1
-        severity = item.get('severity', 'medium')
-        if severity == 'medium':
-            summary[key]['medium_alerts'] += 1
-        elif severity == 'high':
-            summary[key]['high_alerts'] += 1
-        elif severity == 'critical':
-            summary[key]['critical_alerts'] += 1
-    
-    return list(summary.values())
+        print(f"Retrieved {len(items)} items from DynamoDB")
+        
+        # Process items to create summary
+        summary = {}
+        for item in items:
+            # Include region in the key
+            region = item.get('region', 'us-east-1')
+            key = (item['account_id'], item['service'], region)
+            if key not in summary:
+                summary[key] = {
+                    'account_id': item['account_id'],
+                    'service': item['service'],
+                    'region': region,
+                    'total_alerts': 0,
+                    'medium_alerts': 0,
+                    'high_alerts': 0,
+                    'critical_alerts': 0
+                }
+            
+            summary[key]['total_alerts'] += 1
+            severity = item.get('severity', 'medium')
+            if severity == 'medium':
+                summary[key]['medium_alerts'] += 1
+            elif severity == 'high':
+                summary[key]['high_alerts'] += 1
+            elif severity == 'critical':
+                summary[key]['critical_alerts'] += 1
+        
+        result = list(summary.values())
+        print(f"Returning {len(result)} summary records")
+        return result
+    except Exception as e:
+        print(f"Error in get_account_service_summary: {e}")
+        # Return empty list instead of raising exception
+        return []
 
 def get_service_resources(account_id: str, service: str, region: str = None):
     """Get resources for a specific account and service with alert counts"""

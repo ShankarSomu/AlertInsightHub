@@ -266,6 +266,7 @@ async def get_dashboard():
             fetch('/api/summary')
                 .then(response => response.json())
                 .then(data => {
+                    console.log("Received data:", data); // Debug log
                     summaryData = data;
                     
                     // Extract unique accounts, services, and regions for filters
@@ -337,6 +338,8 @@ async def get_dashboard():
                 const tbody = document.getElementById('summary-body');
                 tbody.innerHTML = '';
                 
+                console.log("Rendering table with data:", data); // Debug log
+                
                 // Update sort indicators on headers
                 document.querySelectorAll('#summary-table th[data-sort]').forEach(header => {
                     header.classList.remove('sort-asc', 'sort-desc');
@@ -344,6 +347,14 @@ async def get_dashboard():
                         header.classList.add(currentSortOrder === 'asc' ? 'sort-asc' : 'sort-desc');
                     }
                 });
+                
+                // Show a message if no data is available
+                if (data.length === 0) {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `<td colspan="7" style="text-align: center; padding: 20px;">No data available. Please check your DynamoDB connection or seed some sample data.</td>`;
+                    tbody.appendChild(row);
+                    return;
+                }
                 
                 data.forEach(item => {
                     const row = document.createElement('tr');
@@ -636,7 +647,9 @@ async def get_summary():
     """Get summary of alerts by account and service"""
     try:
         logger.info("Fetching account and service summary")
-        return db.get_account_service_summary()
+        result = db.get_account_service_summary()
+        logger.info(f"Summary data count: {len(result)}")
+        return result
     except Exception as e:
         logger.error(f"Error fetching summary: {e}")
         raise HTTPException(status_code=500, detail=str(e))
