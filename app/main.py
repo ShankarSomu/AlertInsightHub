@@ -69,10 +69,11 @@ async def get_dashboard():
             th.sort-asc:after { content: "▲"; }
             th.sort-desc:after { content: "▼"; }
             tr:hover { background-color: #f5f5f5; }
-            .medium { color: #ff9900; }
-            .high { color: #ff6600; }
-            .critical { color: #cc0000; }
+            .medium { color: #ff9900; text-decoration: underline; }
+            .high { color: #ff6600; text-decoration: underline; }
+            .critical { color: #cc0000; text-decoration: underline; }
             .summary-alert, .resource-alert, .alert-detail { cursor: pointer; }
+            .summary-alert:hover, .resource-alert:hover, .alert-detail:hover { background-color: #f0f0f0; font-weight: bold; }
             .clickable { position: relative; }
             .clickable:after { content: "👆"; font-size: 10px; position: absolute; top: 0; right: 0; opacity: 0.5; }
             #details, #resource-details, #alert-details { margin-top: 20px; display: none; }
@@ -86,7 +87,11 @@ async def get_dashboard():
             .filter-group { display: flex; align-items: center; gap: 5px; }
             select { padding: 5px; border-radius: 3px; border: 1px solid #ddd; }
             label { font-weight: bold; }
+            .chart-container { display: flex; gap: 20px; margin-bottom: 20px; }
+            .chart-box { flex: 1; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); padding: 15px; height: 300px; }
+            .chart-title { font-size: 16px; font-weight: bold; margin-bottom: 10px; }
         </style>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     </head>
     <body>
         <h1>AWS Alert Insight Hub</h1>
@@ -99,6 +104,17 @@ async def get_dashboard():
                 Click on alert numbers to view details. 
                 Hold <kbd>Shift</kbd> and click on a severity number to see all alerts of that severity.
             </p>
+        </div>
+        
+        <div class="chart-container">
+            <div class="chart-box">
+                <div class="chart-title">Alerts by Service</div>
+                <canvas id="serviceChart"></canvas>
+            </div>
+            <div class="chart-box">
+                <div class="chart-title">Alerts by Severity</div>
+                <canvas id="severityChart"></canvas>
+            </div>
         </div>
         
         <h2>Account & Service Summary</h2>
@@ -242,6 +258,46 @@ async def get_dashboard():
                     });
             }
             
+            // Function to show filtered alerts for specific account, service, region and severity
+            function showFilteredAlerts(accountId, service, region, severity) {
+                fetch(`/api/alerts/filtered?account=${accountId}&service=${service}&region=${region}&severity=${severity}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.length === 0) {
+                            modalTitle.textContent = 'No Alerts Found';
+                            modalContent.innerHTML = '<p>No alerts match the selected criteria.</p>';
+                        } else {
+                            modalTitle.textContent = `${severity.charAt(0).toUpperCase() + severity.slice(1)} Alerts for ${service} in ${region}`;
+                            
+                            let content = '';
+                            data.forEach((alert, index) => {
+                                const timestamp = new Date(alert.timestamp).toLocaleString();
+                                content += `
+                                    <div style="margin-bottom: 20px; ${index > 0 ? 'border-top: 1px solid #eee; padding-top: 15px;' : ''}">
+                                        <p><strong>Resource:</strong> ${alert.resource_id}</p>
+                                        <p><strong>Alert Type:</strong> ${alert.alert_type}</p>
+                                        <p><strong>Timestamp:</strong> ${timestamp}</p>
+                                        <p><strong>Message:</strong> ${alert.message}</p>
+                                        <div class="remediation">
+                                            <h4>Recommended Action:</h4>
+                                            <p>${alert.remediation}</p>
+                                        </div>
+                                    </div>
+                                `;
+                            });
+                            
+                            modalContent.innerHTML = content;
+                        }
+                        
+                        modal.style.display = 'block';
+                    })
+                    .catch(error => {
+                        modalTitle.textContent = 'Error';
+                        modalContent.innerHTML = `<p>Failed to load alert details: ${error.message}</p>`;
+                        modal.style.display = 'block';
+                    });
+            }
+            
             // Close modal when clicking X
             modalClose.onclick = function() {
                 modal.style.display = 'none';
@@ -262,12 +318,176 @@ async def get_dashboard():
             let currentSortField = 'account';
             let currentSortOrder = 'asc';
             
+            // Function to initialize charts
+            function initializeCharts(data) {
+                // Process data for charts
+                const serviceData = {};
+                const severityData = {
+                    medium: 0,
+                    high: 0,
+                    critical: 0
+                };
+                
+                data.forEach(item => {
+                    // Aggregate by service
+                    if (!serviceData[item.service]) {
+                        serviceData[item.service] = 0;
+                    }
+                    serviceData[item.service] += item.total_alerts;
+                    
+                    // Aggregate by severity
+                    severityData.medium += item.medium_alerts;
+                    severityData.high += item.high_alerts;
+                    severityData.critical += item.critical_alerts;
+                });
+                
+                // Create service chart
+                const serviceCtx = document.getElementById('serviceChart').getContext('2d');
+                const serviceChart = new Chart(serviceCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: Object.keys(serviceData),
+                        datasets: [{
+                            label: 'Total Alerts',
+                            data: Object.values(serviceData),
+                            backgroundColor: [
+                                'rgba(54, 162, 235, 0.6)',
+                                'rgba(75, 192, 192, 0.6)',
+                                'rgba(153, 102, 255, 0.6)',
+                                'rgba(255, 159, 64, 0.6)',
+                                'rgba(255, 99, 132, 0.6)'
+                            ],
+                            borderColor: [
+                                'rgba(54, 162, 235, 1)',
+                                'rgba(75, 192, 192, 1)',
+                                'rgba(153, 102, 255, 1)',
+                                'rgba(255, 159, 64, 1)',
+                                'rgba(255, 99, 132, 1)'
+                            ],
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: true,
+                        aspectRatio: 2,
+                        scales: {
+                            y: {
+                                beginAtZero: true
+                            }
+                        },
+                        onClick: (event, elements) => {
+                            if (elements.length > 0) {
+                                const index = elements[0].index;
+                                const service = Object.keys(serviceData)[index];
+                                
+                                // Filter the table to show only this service
+                                document.getElementById('service-filter').value = service;
+                                applyFilters();
+                            }
+                        }
+                    }
+                });
+                
+                // Create severity chart
+                const severityCtx = document.getElementById('severityChart').getContext('2d');
+                const severityChart = new Chart(severityCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['Medium', 'High', 'Critical'],
+                        datasets: [{
+                            data: [severityData.medium, severityData.high, severityData.critical],
+                            backgroundColor: [
+                                'rgba(255, 206, 86, 0.6)',
+                                'rgba(255, 159, 64, 0.6)',
+                                'rgba(255, 99, 132, 0.6)'
+                            ],
+                            borderColor: [
+                                'rgba(255, 206, 86, 1)',
+                                'rgba(255, 159, 64, 1)',
+                                'rgba(255, 99, 132, 1)'
+                            ],
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: true,
+                        aspectRatio: 1.5,
+                        plugins: {
+                            legend: {
+                                position: 'right'
+                            }
+                        },
+                        onClick: (event, elements) => {
+                            if (elements.length > 0) {
+                                const index = elements[0].index;
+                                const severities = ['medium', 'high', 'critical'];
+                                const severity = severities[index];
+                                
+                                // Show all alerts of this severity
+                                showAllSeverityAlerts(severity);
+                            }
+                        }
+                    }
+                });
+                
+                // Store charts in global variables for later updates
+                window.serviceChart = serviceChart;
+                window.severityChart = severityChart;
+            }
+            
+            // Function to update charts when filters change
+            function updateCharts(data) {
+                if (!window.serviceChart || !window.severityChart) {
+                    initializeCharts(data);
+                    return;
+                }
+                
+                // Process data for charts
+                const serviceData = {};
+                const severityData = {
+                    medium: 0,
+                    high: 0,
+                    critical: 0
+                };
+                
+                data.forEach(item => {
+                    // Aggregate by service
+                    if (!serviceData[item.service]) {
+                        serviceData[item.service] = 0;
+                    }
+                    serviceData[item.service] += item.total_alerts;
+                    
+                    // Aggregate by severity
+                    severityData.medium += item.medium_alerts;
+                    severityData.high += item.high_alerts;
+                    severityData.critical += item.critical_alerts;
+                });
+                
+                // Update service chart
+                window.serviceChart.data.labels = Object.keys(serviceData);
+                window.serviceChart.data.datasets[0].data = Object.values(serviceData);
+                window.serviceChart.update();
+                
+                // Update severity chart
+                window.severityChart.data.datasets[0].data = [
+                    severityData.medium,
+                    severityData.high,
+                    severityData.critical
+                ];
+                window.severityChart.update();
+            }
+            
             // Load summary data
             fetch('/api/summary')
                 .then(response => response.json())
                 .then(data => {
                     console.log("Received data:", data); // Debug log
                     summaryData = data;
+                    
+                    // Initialize charts
+                    initializeCharts(data);
                     
                     // Extract unique accounts, services, and regions for filters
                     data.forEach(item => {
@@ -392,12 +612,14 @@ async def get_dashboard():
                                 const severity = this.getAttribute('data-severity');
                                 showAllSeverityAlerts(severity);
                             } else {
-                                // Normal click - drill down to resources
+                                // Normal click - show filtered alerts for this specific combination
                                 const accountId = this.getAttribute('data-account');
                                 const service = this.getAttribute('data-service');
                                 const severity = this.getAttribute('data-severity');
                                 const region = this.getAttribute('data-region');
-                                loadResourceData(accountId, service, severity, region);
+                                
+                                // Show modal with filtered alerts
+                                showFilteredAlerts(accountId, service, region, severity);
                             }
                         });
                     }
@@ -476,6 +698,9 @@ async def get_dashboard():
                 
                 // Render the filtered and sorted data
                 renderSummaryTable(filteredData);
+                
+                // Update charts with filtered data
+                updateCharts(filteredData);
             }
                 
             // Load resource data for a service
@@ -497,9 +722,30 @@ async def get_dashboard():
                 fetch(url)
                     .then(response => response.json())
                     .then(data => {
+                        console.log("Resource data:", data);
                         const tbody = document.getElementById('resources-body');
                         tbody.innerHTML = '';
-                        data.forEach(item => {
+                        
+                        // Ensure data is an array and all items have required properties
+                        const dataArray = Array.isArray(data) ? data : [data];
+                        
+                        if (dataArray.length === 0) {
+                            const row = document.createElement('tr');
+                            row.innerHTML = `<td colspan="5" style="text-align: center; padding: 20px;">No resources found for this service.</td>`;
+                            tbody.appendChild(row);
+                            return;
+                        }
+                        
+                        dataArray.forEach(item => {
+                            // Ensure all required properties exist
+                            item = {
+                                resource_id: item.resource_id || 'Unknown',
+                                total_alerts: item.total_alerts || 0,
+                                medium_alerts: item.medium_alerts || 0,
+                                high_alerts: item.high_alerts || 0,
+                                critical_alerts: item.critical_alerts || 0,
+                                ...item
+                            };
                             const row = document.createElement('tr');
                             row.innerHTML = `
                                 <td><a href="#" class="resource-link" data-resource="${item.resource_id}">${item.resource_id}</a></td>
@@ -658,10 +904,21 @@ async def get_service_resources(account_id: str, service: str, region: str = Non
     """Get resources for a specific account and service with alert counts"""
     try:
         logger.info(f"Fetching resources for account {account_id}, service {service}, region {region}")
-        return db.get_service_resources(account_id, service, region)
+        result = db.get_service_resources(account_id, service, region)
+        logger.info(f"Found {len(result)} resources")
+        return result
     except Exception as e:
         logger.error(f"Error fetching service resources: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Return a default item instead of raising an exception
+        return [{
+            'resource_id': f"error-{service}",
+            'service': service,
+            'region': region or 'us-east-1',
+            'total_alerts': 0,
+            'medium_alerts': 0,
+            'high_alerts': 0,
+            'critical_alerts': 0
+        }]
 
 @app.get("/api/summary/{severity}")
 async def get_summary_by_severity(severity: str):
@@ -692,6 +949,16 @@ async def get_alert_details(resource_id: str, alert_type: str, severity: str):
     except Exception as e:
         logger.error(f"Error fetching alert details: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/alerts/filtered")
+async def get_filtered_alerts(account: str, service: str, region: str, severity: str):
+    """Get alerts filtered by account, service, region and severity"""
+    try:
+        logger.info(f"Fetching filtered alerts for account {account}, service {service}, region {region}, severity {severity}")
+        return db.get_filtered_alerts(account, service, region, severity)
+    except Exception as e:
+        logger.error(f"Error fetching filtered alerts: {e}")
+        return []
 
 if __name__ == "__main__":
     import uvicorn

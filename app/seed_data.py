@@ -63,7 +63,7 @@ def create_table():
 # Generate sample data
 def generate_sample_data():
     # Sample data configuration
-    accounts = ["111111111111", "222222222222", "333333333333"]
+    accounts = ["123456789012", "987654321098", "456789012345"]
     services = ["EC2", "RDS", "Lambda", "S3", "DynamoDB"]
     regions = ["us-east-1", "us-west-2", "eu-west-1", "ap-southeast-1"]
     

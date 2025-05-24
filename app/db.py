@@ -72,7 +72,7 @@ def seed_sample_data():
     sample_data = [
         {
             "id": str(uuid.uuid4()),
-            "account_id": "111111111111",
+            "account_id": "123456789012",
             "service": "EC2",
             "resource_id": "i-08abcd12345ef6789",
             "alert_type": "CPU",
@@ -82,7 +82,7 @@ def seed_sample_data():
         },
         {
             "id": str(uuid.uuid4()),
-            "account_id": "111111111111",
+            "account_id": "123456789012",
             "service": "EC2",
             "resource_id": "i-08abcd12345ef6789",
             "alert_type": "Memory",
@@ -92,7 +92,7 @@ def seed_sample_data():
         },
         {
             "id": str(uuid.uuid4()),
-            "account_id": "111111111111",
+            "account_id": "123456789012",
             "service": "RDS",
             "resource_id": "db-instance-1",
             "alert_type": "Disk",
@@ -102,7 +102,7 @@ def seed_sample_data():
         },
         {
             "id": str(uuid.uuid4()),
-            "account_id": "222222222222",
+            "account_id": "987654321098",
             "service": "Lambda",
             "resource_id": "function-alerts",
             "alert_type": "Timeout",
@@ -112,7 +112,7 @@ def seed_sample_data():
         },
         {
             "id": str(uuid.uuid4()),
-            "account_id": "222222222222",
+            "account_id": "987654321098",
             "service": "EC2",
             "resource_id": "i-09efgh67890ab1234",
             "alert_type": "CPU",
@@ -179,56 +179,85 @@ def get_service_resources(account_id: str, service: str, region: str = None):
     dynamodb = get_dynamodb_client()
     table = dynamodb.Table('alerts')
     
-    # Build filter expression based on whether region is provided
-    if region and region != 'all':
-        filter_expr = "account_id = :account_id AND service = :service AND region = :region"
-        expr_values = {
-            ':account_id': account_id,
-            ':service': service,
-            ':region': region
-        }
-    else:
-        filter_expr = "account_id = :account_id AND service = :service"
-        expr_values = {
-            ':account_id': account_id,
-            ':service': service
-        }
-    
-    response = table.scan(
-        FilterExpression=filter_expr,
-        ExpressionAttributeValues=expr_values
-    )
-    
-    items = response['Items']
-    
-    # Process items to create resource summary
-    summary = {}
-    for item in items:
-        resource_id = item['resource_id']
-        item_region = item.get('region', 'us-east-1')
-        key = (resource_id, item_region)
+    try:
+        # Build filter expression based on whether region is provided
+        if region and region != 'all':
+            # Use ExpressionAttributeNames for reserved keyword 'region'
+            filter_expr = "account_id = :account_id AND service = :service AND #r = :region"
+            expr_values = {
+                ':account_id': account_id,
+                ':service': service,
+                ':region': region
+            }
+            expr_names = {'#r': 'region'}
+        else:
+            filter_expr = "account_id = :account_id AND service = :service"
+            expr_values = {
+                ':account_id': account_id,
+                ':service': service
+            }
+            expr_names = {}
         
-        if key not in summary:
-            summary[key] = {
-                'resource_id': resource_id,
+        response = table.scan(
+            FilterExpression=filter_expr,
+            ExpressionAttributeValues=expr_values,
+            ExpressionAttributeNames=expr_names if expr_names else None
+        )
+        
+        items = response['Items']
+        
+        # If no items found, return a default item to avoid undefined values
+        if not items:
+            return [{
+                'resource_id': f"no-resources-found-{service}",
                 'service': service,
-                'region': item_region,
+                'region': region or 'us-east-1',
                 'total_alerts': 0,
                 'medium_alerts': 0,
                 'high_alerts': 0,
                 'critical_alerts': 0
-            }
+            }]
         
-        summary[key]['total_alerts'] += 1
-        severity = item.get('severity', 'medium')
-        if severity == 'medium':
-            summary[key]['medium_alerts'] += 1
-        elif severity == 'high':
-            summary[key]['high_alerts'] += 1
-        elif severity == 'critical':
-            summary[key]['critical_alerts'] += 1
-    
-    return list(summary.values())
+        # Process items to create resource summary
+        summary = {}
+        for item in items:
+            resource_id = item['resource_id']
+            item_region = item.get('region', 'us-east-1')
+            key = (resource_id, item_region)
+            
+            if key not in summary:
+                summary[key] = {
+                    'resource_id': resource_id,
+                    'service': service,
+                    'region': item_region,
+                    'total_alerts': 0,
+                    'medium_alerts': 0,
+                    'high_alerts': 0,
+                    'critical_alerts': 0
+                }
+            
+            summary[key]['total_alerts'] += 1
+            severity = item.get('severity', 'medium')
+            if severity == 'medium':
+                summary[key]['medium_alerts'] += 1
+            elif severity == 'high':
+                summary[key]['high_alerts'] += 1
+            elif severity == 'critical':
+                summary[key]['critical_alerts'] += 1
+        
+        return list(summary.values())
+    except Exception as e:
+        print(f"Error in get_service_resources: {e}")
+        # Return a default item in case of error
+        return [{
+            'resource_id': f"error-{service}",
+            'service': service,
+            'region': region or 'us-east-1',
+            'total_alerts': 0,
+            'medium_alerts': 0,
+            'high_alerts': 0,
+            'critical_alerts': 0
+        }]
 
 def get_resource_alerts(resource_id: str):
     """Get alert types and counts for a specific resource"""
@@ -273,7 +302,7 @@ def get_alert_details(resource_id: str, alert_type: str, severity: str):
     dynamodb = get_dynamodb_client()
     table = dynamodb.Table('alerts')
     
-    # Filter by resource_id, alert_type and severity
+    # Filter by resource_id, alert_type and severity - ensure we only get alerts of the specified severity
     response = table.scan(
         FilterExpression="resource_id = :resource_id AND alert_type = :alert_type AND severity = :severity",
         ExpressionAttributeValues={
@@ -311,6 +340,45 @@ def get_alerts_by_severity(severity: str):
         item['remediation'] = get_remediation_action(item['service'], item['alert_type'], item['severity'])
     
     return items
+
+def get_filtered_alerts(account_id: str, service: str, region: str, severity: str):
+    """Get alerts filtered by account, service, region and severity"""
+    dynamodb = get_dynamodb_client()
+    table = dynamodb.Table('alerts')
+    
+    try:
+        # Build filter expression
+        filter_expr = "account_id = :account_id AND service = :service AND severity = :severity"
+        expr_values = {
+            ':account_id': account_id,
+            ':service': service,
+            ':severity': severity
+        }
+        expr_names = {}
+        
+        # Add region filter if provided
+        if region and region != 'all':
+            filter_expr += " AND #r = :region"
+            expr_values[':region'] = region
+            expr_names['#r'] = 'region'
+        
+        # Execute the query
+        response = table.scan(
+            FilterExpression=filter_expr,
+            ExpressionAttributeValues=expr_values,
+            ExpressionAttributeNames=expr_names if expr_names else None
+        )
+        
+        items = response['Items']
+        
+        # Add remediation recommendations
+        for item in items:
+            item['remediation'] = get_remediation_action(item['service'], item['alert_type'], item['severity'])
+        
+        return items
+    except Exception as e:
+        print(f"Error in get_filtered_alerts: {e}")
+        return []
 
 def get_remediation_action(service: str, alert_type: str, severity: str):
     """Get remediation recommendations based on service, alert type and severity"""
