@@ -1,0 +1,11 @@
+{
+  "name": "Alert Dashboard DevContainer",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "forwardPorts": [8000, 8001],
+  "postCreateCommand": "bash /usr/local/bin/install.sh",
+  "settings": {
+    "terminal.integrated.shell.linux": "/bin/bash"
+  }
+}
