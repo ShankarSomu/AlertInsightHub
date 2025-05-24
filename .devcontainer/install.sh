@@ -18,17 +18,30 @@ fi
 
 # Start DynamoDB Local on port 8001
 echo "Starting DynamoDB Local on port 8001..."
-nohup java -Djava.library.path=./DynamoDBLocal_lib -jar DynamoDBLocal.jar -sharedDb -port 8001 > dynamodb.log 2>&1 &
+nohup java -Djava.library.path=./DynamoDBLocal_lib -jar DynamoDBLocal.jar -sharedDb -port 8001 -inMemory > ~/dynamodb.log 2>&1 &
 
 # Set environment variable for DynamoDB Local
 export AWS_ENDPOINT_URL=http://localhost:8001
 
-# Start FastAPI app on port 8000
-echo "Starting FastAPI app on port 8000..."
-cd /workspace
-nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload > fastapi.log 2>&1 &
+# Create a simple test script to verify connectivity
+cat > ~/test-connectivity.sh << 'EOL'
+#!/bin/bash
+echo "Testing connectivity..."
+echo "DynamoDB Local:"
+curl -s http://localhost:8001 || echo "Failed to connect to DynamoDB Local"
+echo ""
+echo "FastAPI:"
+curl -s http://localhost:8000 || echo "Failed to connect to FastAPI"
+EOL
 
-echo "Services started:"
+chmod +x ~/test-connectivity.sh
+
+echo "DynamoDB Local started on port 8001"
+echo "FastAPI will start automatically in the terminal"
+echo ""
+echo "To test connectivity, run: ~/test-connectivity.sh"
+echo ""
+echo "Services:"
 echo "- DynamoDB Local: http://localhost:8001"
 echo "- FastAPI Dashboard: http://localhost:8000"
 echo "- API Documentation: http://localhost:8000/docs"
