@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 from typing import List, Dict, Any
 from .models import Alert, SeverityLevel
+import requests
 
 # DynamoDB setup
 def get_dynamodb_client():
@@ -600,8 +601,127 @@ def get_webhook_stats(date=None):
             'dates': {}
         }
 
+def get_gorqcloud_api_key():
+    """Get the Groq API key from settings"""
+    dynamodb = get_dynamodb_client()
+    
+    # Check if settings table exists
+    existing_tables = [table.name for table in dynamodb.tables.all()]
+    if 'settings' not in existing_tables:
+        return None
+    
+    table = dynamodb.Table('settings')
+    response = table.get_item(Key={'setting_name': 'gorqcloud_api_key'})
+    
+    if 'Item' in response:
+        return response['Item'].get('setting_value')
+    
+    return None
+
+def get_agent_settings():
+    """Get the agent role and description from settings"""
+    dynamodb = get_dynamodb_client()
+    
+    # Check if settings table exists
+    existing_tables = [table.name for table in dynamodb.tables.all()]
+    if 'settings' not in existing_tables:
+        return None, None
+    
+    table = dynamodb.Table('settings')
+    
+    # Get agent role
+    role_response = table.get_item(Key={'setting_name': 'agent_role'})
+    role = role_response.get('Item', {}).get('setting_value', 'AWS Cloud Expert')
+    
+    # Get agent description
+    desc_response = table.get_item(Key={'setting_name': 'agent_description'})
+    description = desc_response.get('Item', {}).get('setting_value', 
+        'You are an AWS cloud expert specializing in monitoring and resolving alerts. Provide concise, actionable recommendations.')
+    
+    return role, description
+
 def get_remediation_action(service: str, alert_type: str, severity: str):
-    """Get remediation recommendations based on service, alert type and severity"""
+    """Get remediation recommendations using Groq LLM if available, otherwise use default"""
+    # Try to get API key
+    api_key = get_gorqcloud_api_key()
+    use_ai = False
+    
+    # Check if AI recommendations are enabled
+    dynamodb = get_dynamodb_client()
+    existing_tables = [table.name for table in dynamodb.tables.all()]
+    if 'settings' in existing_tables:
+        table = dynamodb.Table('settings')
+        response = table.get_item(Key={'setting_name': 'use_ai_recommendations'})
+        if 'Item' in response and response['Item'].get('setting_value') == 'true':
+            use_ai = True
+    
+    if api_key and use_ai:
+        try:
+            # Use the Groq client to get a recommendation
+            from groq import Groq
+            import os
+            
+            # Get agent role and description
+            agent_role, agent_description = get_agent_settings()
+            
+            # Set the API key for the Groq client
+            os.environ["GROQ_API_KEY"] = api_key
+            
+            # Initialize the Groq client
+            client = Groq(api_key=api_key)
+            
+            # Create the system message with the agent role and description
+            system_message = f"You are a {agent_role}. {agent_description}"
+            
+            # Create the user prompt for the recommendation
+            user_prompt = f"Provide a concise recommendation for addressing a {severity} severity {alert_type} alert on an AWS {service} resource. Keep it under 100 words."
+            
+            # Make the API call
+            completion = client.chat.completions.create(
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": system_message
+                    },
+                    {
+                        "role": "user",
+                        "content": user_prompt
+                    }
+                ],
+                temperature=0.7,
+                max_completion_tokens=100,
+                top_p=1,
+                stream=False
+            )
+            
+            # Extract the recommendation from the response
+            if completion.choices and len(completion.choices) > 0:
+                ai_recommendation = completion.choices[0].message.content.strip()
+                # Store the recommendation in the database for future use
+                store_recommendation(service, alert_type, severity, ai_recommendation)
+                return ai_recommendation
+                
+        except Exception as e:
+            print(f"Error calling Groq API: {e}")
+    
+    # Fallback to default recommendations if API call fails or no API key
+    default_remediation = f"Investigate the {severity} {alert_type} alert for your {service} resource."
+    
+    # Check if we already have a recommendation in the database
+    if 'alert_recommendations' in existing_tables:
+        table = dynamodb.Table('alert_recommendations')
+        response = table.get_item(
+            Key={
+                'service': service,
+                'alert_type_severity': f"{alert_type}_{severity}"
+            }
+        )
+        
+        if 'Item' in response:
+            return response['Item'].get('recommendation', default_remediation)
+    
+    # Default hardcoded recommendations as fallback
     remediation_map = {
         "EC2": {
             "CPU": {
@@ -613,16 +733,6 @@ def get_remediation_action(service: str, alert_type: str, severity: str):
                 "medium": "Monitor memory usage and consider application optimization.",
                 "high": "Increase instance memory or optimize memory-intensive processes.",
                 "critical": "Immediately increase instance memory and investigate memory leaks."
-            },
-            "Disk": {
-                "medium": "Clean up unnecessary files or consider increasing storage.",
-                "high": "Increase EBS volume size or add additional volumes.",
-                "critical": "Immediately increase storage and implement better disk management."
-            },
-            "Network": {
-                "medium": "Monitor network traffic patterns for optimization.",
-                "high": "Optimize network-intensive operations or increase bandwidth.",
-                "critical": "Investigate potential DDoS attack or network bottlenecks."
             }
         },
         "RDS": {
@@ -630,54 +740,9 @@ def get_remediation_action(service: str, alert_type: str, severity: str):
                 "medium": "Review and optimize database queries.",
                 "high": "Scale up your database instance or implement read replicas.",
                 "critical": "Immediately scale up your instance and optimize critical queries."
-            },
-            "Memory": {
-                "medium": "Review database configuration for memory settings.",
-                "high": "Increase instance memory or optimize memory-intensive queries.",
-                "critical": "Immediately increase instance memory and fix memory leaks."
-            },
-            "Storage": {
-                "medium": "Clean up old data or implement archiving strategy.",
-                "high": "Increase storage capacity or implement data partitioning.",
-                "critical": "Immediately increase storage and implement emergency cleanup."
-            },
-            "IOPS": {
-                "medium": "Review I/O intensive queries and optimize.",
-                "high": "Increase provisioned IOPS or implement caching.",
-                "critical": "Immediately increase provisioned IOPS and fix I/O bottlenecks."
-            },
-            "Connections": {
-                "medium": "Review connection pooling configuration.",
-                "high": "Implement better connection management or increase max connections.",
-                "critical": "Immediately fix connection leaks and optimize connection usage."
-            }
-        },
-        "Lambda": {
-            "Timeout": {
-                "medium": "Review function logic for optimization opportunities.",
-                "high": "Increase timeout setting or break function into smaller parts.",
-                "critical": "Immediately refactor function to handle workload appropriately."
-            },
-            "Error": {
-                "medium": "Review error logs and implement better error handling.",
-                "high": "Fix critical errors and implement retry mechanisms.",
-                "critical": "Immediately fix function errors and implement circuit breakers."
-            },
-            "Throttle": {
-                "medium": "Review concurrency settings and usage patterns.",
-                "high": "Increase concurrency limits or implement backoff strategies.",
-                "critical": "Immediately increase concurrency limits and optimize invocation patterns."
-            },
-            "Memory": {
-                "medium": "Review memory usage and optimize function code.",
-                "high": "Increase allocated memory or optimize memory-intensive operations.",
-                "critical": "Immediately increase memory allocation and fix memory leaks."
             }
         }
     }
-    
-    # Get default remediation if specific one is not found
-    default_remediation = f"Investigate the {severity} {alert_type} alert for your {service} resource."
     
     # Try to get specific remediation
     service_remediation = remediation_map.get(service, {})
@@ -685,3 +750,39 @@ def get_remediation_action(service: str, alert_type: str, severity: str):
     specific_remediation = alert_type_remediation.get(severity, default_remediation)
     
     return specific_remediation
+
+def store_recommendation(service, alert_type, severity, recommendation):
+    """Store a recommendation in the database"""
+    dynamodb = get_dynamodb_client()
+    
+    # Check if recommendations table exists
+    existing_tables = [table.name for table in dynamodb.tables.all()]
+    if 'alert_recommendations' not in existing_tables:
+        # Create recommendations table
+        recommendations_table = dynamodb.create_table(
+            TableName='alert_recommendations',
+            KeySchema=[
+                {'AttributeName': 'service', 'KeyType': 'HASH'},
+                {'AttributeName': 'alert_type_severity', 'KeyType': 'RANGE'},
+            ],
+            AttributeDefinitions=[
+                {'AttributeName': 'service', 'AttributeType': 'S'},
+                {'AttributeName': 'alert_type_severity', 'AttributeType': 'S'},
+            ],
+            ProvisionedThroughput={'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+        )
+        # Wait for table to be created
+        recommendations_table.meta.client.get_waiter('table_exists').wait(TableName='alert_recommendations')
+        table = dynamodb.Table('alert_recommendations')
+    else:
+        table = dynamodb.Table('alert_recommendations')
+    
+    # Save recommendation
+    table.put_item(
+        Item={
+            'service': service,
+            'alert_type_severity': f"{alert_type}_{severity}",
+            'recommendation': recommendation,
+            'created_at': datetime.now().isoformat()
+        }
+    )
