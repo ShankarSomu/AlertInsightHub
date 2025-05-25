@@ -174,6 +174,55 @@ async def load_sample_webhooks():
         
         print(f"Cleared {len(queue_items)} existing webhook items")
         
+        # Check if alerts table exists and create if needed
+        if 'alerts' not in existing_tables:
+            print("Creating alerts table as it doesn't exist")
+            alerts_table = dynamodb.create_table(
+                TableName='alerts',
+                KeySchema=[
+                    {'AttributeName': 'id', 'KeyType': 'HASH'},
+                ],
+                AttributeDefinitions=[
+                    {'AttributeName': 'id', 'AttributeType': 'S'},
+                    {'AttributeName': 'account_id', 'AttributeType': 'S'},
+                    {'AttributeName': 'service', 'AttributeType': 'S'},
+                    {'AttributeName': 'resource_id', 'AttributeType': 'S'},
+                ],
+                GlobalSecondaryIndexes=[
+                    {
+                        'IndexName': 'account-service-index',
+                        'KeySchema': [
+                            {'AttributeName': 'account_id', 'KeyType': 'HASH'},
+                            {'AttributeName': 'service', 'KeyType': 'RANGE'}
+                        ],
+                        'Projection': {'ProjectionType': 'ALL'},
+                        'ProvisionedThroughput': {'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+                    },
+                    {
+                        'IndexName': 'resource-index',
+                        'KeySchema': [
+                            {'AttributeName': 'resource_id', 'KeyType': 'HASH'},
+                        ],
+                        'Projection': {'ProjectionType': 'ALL'},
+                        'ProvisionedThroughput': {'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+                    }
+                ],
+                ProvisionedThroughput={'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+            )
+            # Wait for table to be created
+            alerts_table.meta.client.get_waiter('table_exists').wait(TableName='alerts')
+            print("alerts table created successfully")
+        else:
+            alerts_table = dynamodb.Table('alerts')
+            
+        # Clear existing alerts
+        alert_items = alerts_table.scan().get('Items', [])
+        with alerts_table.batch_writer() as batch:
+            for item in alert_items:
+                batch.delete_item(Key={'id': item['id']})
+        
+        print(f"Cleared {len(alert_items)} existing alert items")
+        
         # Generate 20 sample webhooks
         for i in range(20):
             webhook_id = str(uuid.uuid4())
@@ -185,6 +234,9 @@ async def load_sample_webhooks():
             status = "pending"
             
             # Create AWS SNS-like message
+            accounts = ["123456789012", "987654321098", "456789012345"]
+            account_id = random.choice(accounts)
+            
             aws_services = ["EC2", "RDS", "S3", "Lambda", "CloudWatch"]
             service = random.choice(aws_services)
             
@@ -199,6 +251,9 @@ async def load_sample_webhooks():
             alert_type = random.choice(alert_types.get(service, ["Alert"]))
             severity_levels = ["medium", "high", "critical"]
             severity = random.choice(severity_levels)
+            
+            regions = ["us-east-1", "us-west-2", "eu-west-1", "ap-southeast-1"]
+            region = random.choice(regions)
             
             # Create AWS SNS-like message
             subject = f"AWS {service} {alert_type} {severity.upper()} Alert"
@@ -220,7 +275,7 @@ async def load_sample_webhooks():
             message_body = {
                 "Type": "Notification",
                 "MessageId": f"message-{uuid.uuid4().hex}",
-                "TopicArn": f"arn:aws:sns:us-east-1:123456789012:aws-alerts",
+                "TopicArn": f"arn:aws:sns:{region}:{account_id}:aws-alerts",
                 "Subject": subject,
                 "Message": f"AWS {service} resource {resource_id} has a {severity} {alert_type} alert. Please investigate immediately.",
                 "Timestamp": now.isoformat(),
@@ -233,8 +288,8 @@ async def load_sample_webhooks():
                     "ResourceId": {"Type": "String", "Value": resource_id},
                     "AlertType": {"Type": "String", "Value": alert_type},
                     "Severity": {"Type": "String", "Value": severity},
-                    "Region": {"Type": "String", "Value": "us-east-1"},
-                    "AccountId": {"Type": "String", "Value": "123456789012"}
+                    "Region": {"Type": "String", "Value": region},
+                    "AccountId": {"Type": "String", "Value": account_id}
                 }
             }
             
@@ -252,16 +307,41 @@ async def load_sample_webhooks():
             
             # Save to DynamoDB
             queue_table.put_item(Item=webhook_item)
-            print(f"Created webhook item {i+1}: {webhook_id} with status {status}")
+            
+            # Create corresponding alert directly (matching the format in seed_data.py)
+            alert_id = str(uuid.uuid4())
+            alert_item = {
+                "id": alert_id,
+                "account_id": account_id,
+                "service": service,
+                "resource_id": resource_id,
+                "alert_type": alert_type,
+                "severity": severity,
+                "timestamp": now.isoformat(),
+                "message": f"{severity.capitalize()} {alert_type} alert for {service} resource {resource_id}",
+                "region": region,
+                "webhook_id": webhook_id,  # Reference to the webhook queue item
+                "remediation": db.get_remediation_action(service, alert_type, severity)
+            }
+            
+            # Save alert directly to alerts table
+            alerts_table.put_item(Item=alert_item)
+            
+            # Update webhook status to processed
+            queue_table.update_item(
+                Key={"id": webhook_id},
+                UpdateExpression="SET #status = :status, processed_at = :processed_at, alert_id = :alert_id",
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={
+                    ":status": "processed",
+                    ":processed_at": now.isoformat(),
+                    ":alert_id": alert_id
+                }
+            )
+            
+            print(f"Created webhook item {i+1}: {webhook_id} with status 'processed' and alert {alert_id}")
         
-        # Process the webhooks automatically
-        from ..webhook_processor import process_pending_webhooks
-        
-        # Process all pending webhooks
-        result = process_pending_webhooks()
-        print(f"Auto-processed {result['processed']} webhooks, discarded {result['discarded']}, errors: {result['error']}")
-        
-        return {"status": "success", "message": f"Loaded and processed {len(sample_data)} sample webhooks"}
+        return {"status": "success", "message": f"Loaded {len(sample_data)} sample webhooks and created matching alerts"}
     except Exception as e:
         print(f"Error loading sample webhooks: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
