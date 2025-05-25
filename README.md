@@ -17,6 +17,11 @@ A FastAPI application that displays a dashboard for AWS cloud alert insights. Th
 - Pydantic models for schema validation
 - Simple HTML/JS frontend for visualization
 
+## Design Architecture
+
+![AlertinsightHubDesignOverview](https://github.com/user-attachments/assets/fbf3a26c-e334-4c42-9175-e5c129231fba)
+
+
 ## Getting Started
 
 ### Prerequisites
