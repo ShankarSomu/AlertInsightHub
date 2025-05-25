@@ -181,31 +181,61 @@ async def load_sample_webhooks():
             # Use current date for all webhooks to ensure they show up
             date_str = now.strftime("%Y-%m-%d")
             
-            # Random status
-            status = random.choice(["pending", "processed", "error"])
+            # All sample webhooks should be pending for processing
+            status = "pending"
             
-            # Create sample email data similar to Postmark webhook
-            email_data = {
-                "Date": now.strftime("%a, %d %b %Y %H:%M:%S +0000"),
-                "From": f"sender{random.randint(1, 100)}@example.com",
-                "FromName": f"Sender {random.randint(1, 100)}",
-                "To": f"recipient{random.randint(1, 100)}@example.com",
-                "Subject": random.choice([
-                    "System notification",
-                    "Critical alert detected",
-                    "High CPU usage warning",
-                    "Database backup completed",
-                    "Security alert",
-                    "Scheduled maintenance"
-                ]),
-                "MessageID": f"message-{random.randint(10000, 99999)}",
-                "Status": random.choice(["Delivered", "Bounced", "Opened", "Clicked"]),
-                "TextBody": f"This is a sample webhook message body for {date_str}.",
-                "HtmlBody": f"<html><body><p>This is a sample webhook message body for {date_str}.</p></body></html>",
-                "Tag": random.choice(["welcome", "notification", "password-reset", "newsletter"]),
-                "MessageStream": "outbound",
-                "Attachments": [],
-                "Headers": [{"Name": "X-Test-Header", "Value": "test-value"}]
+            # Create AWS SNS-like message
+            aws_services = ["EC2", "RDS", "S3", "Lambda", "CloudWatch"]
+            service = random.choice(aws_services)
+            
+            alert_types = {
+                "EC2": ["CPU", "Memory", "Disk", "Network"],
+                "RDS": ["CPU", "Memory", "Storage", "IOPS", "Connections"],
+                "S3": ["Storage", "Access", "Replication"],
+                "Lambda": ["Error", "Timeout", "Throttle", "Memory"],
+                "CloudWatch": ["Alarm", "Event", "Log"]
+            }
+            
+            alert_type = random.choice(alert_types.get(service, ["Alert"]))
+            severity_levels = ["medium", "high", "critical"]
+            severity = random.choice(severity_levels)
+            
+            # Create AWS SNS-like message
+            subject = f"AWS {service} {alert_type} {severity.upper()} Alert"
+            
+            # Generate resource ID based on service
+            resource_id = ""
+            if service == "EC2":
+                resource_id = f"i-{uuid.uuid4().hex[:8]}"
+            elif service == "RDS":
+                resource_id = f"db-instance-{uuid.uuid4().hex[:8]}"
+            elif service == "S3":
+                resource_id = f"my-bucket-{uuid.uuid4().hex[:8]}"
+            elif service == "Lambda":
+                resource_id = f"function-{uuid.uuid4().hex[:8]}"
+            else:
+                resource_id = f"resource-{uuid.uuid4().hex[:8]}"
+            
+            # Create message body
+            message_body = {
+                "Type": "Notification",
+                "MessageId": f"message-{uuid.uuid4().hex}",
+                "TopicArn": f"arn:aws:sns:us-east-1:123456789012:aws-alerts",
+                "Subject": subject,
+                "Message": f"AWS {service} resource {resource_id} has a {severity} {alert_type} alert. Please investigate immediately.",
+                "Timestamp": now.isoformat(),
+                "SignatureVersion": "1",
+                "Signature": "EXAMPLE",
+                "SigningCertURL": "EXAMPLE",
+                "UnsubscribeURL": "EXAMPLE",
+                "MessageAttributes": {
+                    "Service": {"Type": "String", "Value": service},
+                    "ResourceId": {"Type": "String", "Value": resource_id},
+                    "AlertType": {"Type": "String", "Value": alert_type},
+                    "Severity": {"Type": "String", "Value": severity},
+                    "Region": {"Type": "String", "Value": "us-east-1"},
+                    "AccountId": {"Type": "String", "Value": "123456789012"}
+                }
             }
             
             # Create webhook queue item with raw data included
@@ -215,23 +245,8 @@ async def load_sample_webhooks():
                 "date": date_str,
                 "status": status,
                 "source": "sample",
-                "raw_data": email_data  # Include raw data directly in the queue item
+                "raw_data": message_body
             }
-            
-            # Add processed_at if status is not pending
-            if status != "pending":
-                processed_time = now + timedelta(minutes=random.randint(1, 60))
-                webhook_item["processed_at"] = processed_time.isoformat()
-            
-            # Add error message if status is error
-            if status == "error":
-                webhook_item["error_message"] = random.choice([
-                    "Connection timeout",
-                    "Invalid payload format",
-                    "Authentication failed",
-                    "Resource not found",
-                    "Internal server error"
-                ])
             
             sample_data.append(webhook_item)
             
@@ -239,16 +254,14 @@ async def load_sample_webhooks():
             queue_table.put_item(Item=webhook_item)
             print(f"Created webhook item {i+1}: {webhook_id} with status {status}")
         
-        # Verify data was added
-        verification = queue_table.scan(Limit=5)
-        items = verification.get('Items', [])
-        if items:
-            print(f"Verification: Found {len(items)} items in webhook_queue table")
-            print(f"First item: {items[0]}")
-        else:
-            print("WARNING: No items found in webhook_queue table after adding sample data!")
+        # Process the webhooks automatically
+        from ..webhook_processor import process_pending_webhooks
         
-        return {"status": "success", "message": f"Loaded {len(sample_data)} sample webhooks"}
+        # Process all pending webhooks
+        result = process_pending_webhooks()
+        print(f"Auto-processed {result['processed']} webhooks, discarded {result['discarded']}, errors: {result['error']}")
+        
+        return {"status": "success", "message": f"Loaded and processed {len(sample_data)} sample webhooks"}
     except Exception as e:
         print(f"Error loading sample webhooks: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -257,39 +270,20 @@ async def load_sample_webhooks():
 async def process_webhooks():
     """Process pending webhooks"""
     try:
-        # Get all pending webhooks
-        dynamodb = db.get_dynamodb_client()
-        table = dynamodb.Table('webhook_queue')
+        # Import the webhook processor
+        from ..webhook_processor import process_pending_webhooks
         
-        response = table.scan(
-            FilterExpression="#status = :status",
-            ExpressionAttributeNames={"#status": "status"},
-            ExpressionAttributeValues={":status": "pending"}
-        )
+        # Process all pending webhooks
+        result = process_pending_webhooks()
         
-        pending_webhooks = response.get('Items', [])
-        
-        # Process each webhook
-        processed_count = 0
-        for webhook in pending_webhooks:
-            webhook_id = webhook['id']
-            
-            # Simulate processing (80% success, 20% error)
-            if random.random() < 0.8:
-                db.update_webhook_status(webhook_id, "processed")
-            else:
-                error_message = random.choice([
-                    "Processing timeout",
-                    "Invalid data format",
-                    "Resource unavailable",
-                    "Dependency failure"
-                ])
-                db.update_webhook_status(webhook_id, "error", error_message)
-            
-            processed_count += 1
-        
-        return {"status": "success", "message": f"Processed {processed_count} webhooks"}
+        # Return the results
+        return {
+            "status": "success", 
+            "message": f"Processed {result['processed']} webhooks, discarded {result['discarded']}, errors: {result['error']}",
+            "details": result
+        }
     except Exception as e:
+        print(f"Error processing webhooks: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/clear")

@@ -10,7 +10,7 @@ from datetime import datetime
 from . import db
 from .models import AlertSummary, ResourceSummary, AlertTypeSummary
 # Import routes after fixing the syntax issues
-from .routes import webhook_routes, queue_dashboard, webhook_api, process_routes, data_routes
+from .routes import webhook_routes, queue_dashboard, webhook_api, process_routes, data_routes, settings_routes, settings_api
 
 # Configure logging
 logging.basicConfig(
@@ -47,6 +47,8 @@ app.include_router(queue_dashboard.router)
 app.include_router(webhook_api.router)
 app.include_router(process_routes.router)
 app.include_router(data_routes.router)
+app.include_router(settings_routes.router)
+app.include_router(settings_api.router)
 
 # Initialize database on startup
 @app.on_event("startup")
@@ -131,6 +133,7 @@ async def get_dashboard():
             <div class="nav-tab active">Main Dashboard</div>
             <div class="nav-tab" onclick="window.location.href='/queue'">Queue Dashboard</div>
             <div style="margin-left: auto; display: flex; gap: 10px;">
+                <button onclick="window.location.href='/settings'" class="action-btn" style="background-color: #4CAF50;">Settings</button>
                 <button onclick="loadSampleAlerts()" class="action-btn">Load Sample Alerts</button>
                 <button onclick="clearAlerts()" class="action-btn danger">Clear Alerts</button>
             </div>
@@ -1093,12 +1096,33 @@ async def webhook_handler(request: Request):
         queue_table.put_item(Item=queue_item)
         logger.info(f"Created queue item with pending status: {webhook_id}")
         
+        # Process the webhook immediately in the background
+        import asyncio
+        
+        # Create a background task to process the webhook
+        async def process_webhook_async():
+            try:
+                # Import here to avoid circular imports
+                from .routes.process_routes import process_webhook
+                
+                # Process the webhook
+                await process_webhook(webhook_id)
+                logger.info(f"Webhook {webhook_id} processed automatically")
+            except Exception as e:
+                logger.error(f"Error processing webhook {webhook_id}: {str(e)}")
+        
+        # Start the background task
+        asyncio.create_task(process_webhook_async())
+        
         # Return immediately with pending status
         return {
             "status": "success", 
-            "message": "Webhook received and queued for processing", 
+            "message": "Webhook received and processing started", 
             "webhook_id": webhook_id
         }
+    except Exception as e:
+        logger.error(f"Error handling webhook: {str(e)}")
+        return {"status": "error", "message": str(e)}
         
     except Exception as e:
         logger.error(f"Error processing webhook: {e}")

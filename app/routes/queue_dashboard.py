@@ -25,8 +25,12 @@ async def get_queue_dashboard():
             h1 { color: #333; }
             table { border-collapse: collapse; width: 100%; }
             th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-            th { background-color: #f2f2f2; cursor: pointer; position: relative; }
-            th:hover { background-color: #e0e0e0; }
+            th { background-color: #f2f2f2; position: relative; }
+            th.sortable { cursor: pointer; }
+            th.sortable:hover { background-color: #e0e0e0; }
+            th.sort-asc .sort-icon:before { content: "▲"; color: #0078d7; }
+            th.sort-desc .sort-icon:before { content: "▼"; color: #0078d7; }
+            .sort-icon { font-size: 10px; margin-left: 5px; color: #aaa; }
             tr:hover { background-color: #f5f5f5; }
             .pending { color: #ff9900; }
             .processed { color: #4CAF50; }
@@ -61,6 +65,7 @@ async def get_queue_dashboard():
             <div class="nav-tab" onclick="window.location.href='/'">Main Dashboard</div>
             <div class="nav-tab active">Queue Dashboard</div>
             <div style="margin-left: auto; display: flex; gap: 10px;">
+                <button onclick="window.location.href='/settings'" class="action-btn" style="background-color: #4CAF50;">Settings</button>
                 <button onclick="processWebhooks()" class="action-btn">Process Pending Webhooks</button>
                 <button onclick="loadSampleWebhooks()" class="action-btn">Load Sample Webhooks</button>
                 <button onclick="clearWebhooks()" class="action-btn danger">Clear Webhooks</button>
@@ -119,11 +124,11 @@ async def get_queue_dashboard():
         <table id="queue-table">
             <thead>
                 <tr>
-                    <th>ID</th>
-                    <th>Date</th>
-                    <th>Timestamp</th>
-                    <th>Status</th>
-                    <th>Processed At</th>
+                    <th data-sort="id" class="sortable">ID <span class="sort-icon">▲▼</span></th>
+                    <th data-sort="date" class="sortable">Date <span class="sort-icon">▲▼</span></th>
+                    <th data-sort="timestamp" class="sortable">Timestamp <span class="sort-icon">▲▼</span></th>
+                    <th data-sort="status" class="sortable">Status <span class="sort-icon">▲▼</span></th>
+                    <th data-sort="processed_at" class="sortable">Processed At <span class="sort-icon">▲▼</span></th>
                     <th>Actions</th>
                 </tr>
             </thead>
@@ -291,6 +296,10 @@ async def get_queue_dashboard():
                 });
             }
             
+            // Global variables for sorting
+            let currentSortField = 'timestamp';
+            let currentSortOrder = 'desc';
+            
             // Render queue table
             function renderQueueTable(data) {
                 const tbody = document.getElementById('queue-body');
@@ -308,7 +317,40 @@ async def get_queue_dashboard():
                     return;
                 }
                 
-                data.forEach(item => {
+                // Sort the data
+                const sortedData = [...data].sort((a, b) => {
+                    let valueA = a[currentSortField];
+                    let valueB = b[currentSortField];
+                    
+                    // Handle special cases
+                    if (currentSortField === 'processed_at') {
+                        valueA = valueA || ''; // Handle null/undefined
+                        valueB = valueB || '';
+                    }
+                    
+                    // Compare based on data type
+                    if (typeof valueA === 'string' && typeof valueB === 'string') {
+                        return currentSortOrder === 'asc' 
+                            ? valueA.localeCompare(valueB) 
+                            : valueB.localeCompare(valueA);
+                    } else {
+                        // For dates or numbers
+                        return currentSortOrder === 'asc' 
+                            ? (valueA > valueB ? 1 : -1) 
+                            : (valueA < valueB ? 1 : -1);
+                    }
+                });
+                
+                // Update header styles
+                document.querySelectorAll('#queue-table th').forEach(th => {
+                    th.classList.remove('sort-asc', 'sort-desc');
+                    if (th.getAttribute('data-sort') === currentSortField) {
+                        th.classList.add(currentSortOrder === 'asc' ? 'sort-asc' : 'sort-desc');
+                    }
+                });
+                
+                // Render the sorted data
+                sortedData.forEach(item => {
                     const row = document.createElement('tr');
                     const timestamp = new Date(item.timestamp).toLocaleString();
                     const processedAt = item.processed_at ? new Date(item.processed_at).toLocaleString() : '-';
@@ -483,6 +525,25 @@ async def get_queue_dashboard():
                     loadQueueData(null, null);
                     loadStatsData(null);
                 });
+                
+                // Add click handlers for table headers
+                document.querySelectorAll('#queue-table th.sortable').forEach(header => {
+                    header.addEventListener('click', function() {
+                        const sortField = this.getAttribute('data-sort');
+                        if (currentSortField === sortField) {
+                            // Toggle sort order if clicking the same header
+                            currentSortOrder = currentSortOrder === 'asc' ? 'desc' : 'asc';
+                        } else {
+                            // Set new sort field
+                            currentSortField = sortField;
+                            // Default to ascending for most fields, but descending for timestamp
+                            currentSortOrder = sortField === 'timestamp' ? 'desc' : 'asc';
+                        }
+                        
+                        // Re-render the table with current data
+                        renderQueueTable(queueData);
+                    });
+                });
             });
         </script>
     </body>
@@ -509,6 +570,11 @@ async def get_webhook_details(webhook_id: str):
             .info-box { background-color: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); padding: 15px; margin-bottom: 20px; }
             .info-row { display: flex; margin-bottom: 10px; }
             .info-label { font-weight: bold; width: 150px; }
+            .recommendation { background-color: #f0f7ff; border-left: 4px solid #0078d7; padding: 10px; margin-top: 5px; }
+            .interpreted-service { font-weight: bold; color: #0078d7; }
+            .interpreted-severity.medium { color: #ff9900; }
+            .interpreted-severity.high { color: #ff6600; }
+            .interpreted-severity.critical { color: #cc0000; }
             .pending { color: #ff9900; }
             .processed { color: #4CAF50; }
             .error { color: #cc0000; }
@@ -521,6 +587,9 @@ async def get_webhook_details(webhook_id: str):
             <div class="nav-tab" onclick="window.location.href='/'">Main Dashboard</div>
             <div class="nav-tab" onclick="window.location.href='/queue'">Queue Dashboard</div>
             <div class="nav-tab active">Webhook Details</div>
+            <div style="margin-left: auto;">
+                <button onclick="window.location.href='/settings'" class="action-btn" style="background-color: #4CAF50;">Settings</button>
+            </div>
         </div>
         
         <h1>Webhook Details</h1>
@@ -532,6 +601,48 @@ async def get_webhook_details(webhook_id: str):
         <div class="info-box">
             <h2>Raw Data</h2>
             <pre id="raw-data">Loading...</pre>
+        </div>
+        
+        <div class="info-box" id="agent-interpretation" style="display: none;">
+            <h2>Agent Interpretation</h2>
+            <div class="interpretation-content">
+                <div class="info-row">
+                    <div class="info-label">Alert ID:</div>
+                    <div id="alert-id"></div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">Service:</div>
+                    <div id="interpreted-service"></div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">Resource ID:</div>
+                    <div id="interpreted-resource"></div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">Alert Type:</div>
+                    <div id="interpreted-alert-type"></div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">Severity:</div>
+                    <div id="interpreted-severity"></div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">Region:</div>
+                    <div id="interpreted-region"></div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">Account ID:</div>
+                    <div id="interpreted-account"></div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">Message:</div>
+                    <div id="interpreted-message"></div>
+                </div>
+                <div class="info-row">
+                    <div class="info-label">AI Recommendation:</div>
+                    <div id="ai-recommendation" class="recommendation"></div>
+                </div>
+            </div>
         </div>
         
         <button onclick="window.location.href='/queue'">Back to Queue</button>
@@ -601,6 +712,42 @@ async def get_webhook_details(webhook_id: str):
                     .then(data => {
                         // Format and display raw data
                         document.getElementById('raw-data').textContent = JSON.stringify(data.raw_data, null, 2);
+                        
+                        // Display agent interpretation if available
+                        if (data.agent_interpretation) {
+                            document.getElementById('agent-interpretation').style.display = 'block';
+                            
+                            // Fill in the interpretation data
+                            document.getElementById('alert-id').textContent = data.agent_interpretation.alert_id || 'N/A';
+                            
+                            const service = data.agent_interpretation.interpreted_service || 'Unknown';
+                            document.getElementById('interpreted-service').textContent = service;
+                            document.getElementById('interpreted-service').className = 'interpreted-service';
+                            
+                            document.getElementById('interpreted-resource').textContent = 
+                                data.agent_interpretation.interpreted_resource_id || 'Unknown';
+                            
+                            document.getElementById('interpreted-alert-type').textContent = 
+                                data.agent_interpretation.interpreted_alert_type || 'Unknown';
+                            
+                            const severity = data.agent_interpretation.interpreted_severity || 'medium';
+                            document.getElementById('interpreted-severity').textContent = severity;
+                            document.getElementById('interpreted-severity').className = `interpreted-severity ${severity}`;
+                            
+                            document.getElementById('interpreted-region').textContent = 
+                                data.agent_interpretation.interpreted_region || 'Unknown';
+                            
+                            document.getElementById('interpreted-account').textContent = 
+                                data.agent_interpretation.interpreted_account_id || 'Unknown';
+                            
+                            document.getElementById('interpreted-message').textContent = 
+                                data.agent_interpretation.interpreted_message || 'No message';
+                            
+                            document.getElementById('ai-recommendation').textContent = 
+                                data.agent_interpretation.ai_recommendation || 'No recommendation available';
+                        } else {
+                            document.getElementById('agent-interpretation').style.display = 'none';
+                        }
                     })
                     .catch(error => {
                         console.error('Error loading webhook details:', error);
