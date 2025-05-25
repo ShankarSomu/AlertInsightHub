@@ -1,11 +1,16 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import logging
 import os
+import json
+import uuid
+from datetime import datetime
 from . import db
 from .models import AlertSummary, ResourceSummary, AlertTypeSummary
+# Import routes after fixing the syntax issues
+from .routes import webhook_routes, queue_dashboard, webhook_api, process_routes, data_routes, settings_routes, settings_api
 
 # Configure logging
 logging.basicConfig(
@@ -21,6 +26,12 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Set up webhook URL
+webhook_url = "http://localhost:8000/api/webhook"
+logger.info(f"Local webhook URL: {webhook_url}")
+logger.info("For external access, use a service like ngrok or configure your server with a public IP")
+logger.info("Example: ngrok http 8000 (then use the generated URL + /api/webhook)")
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -29,6 +40,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include routes
+app.include_router(webhook_routes.router)
+app.include_router(queue_dashboard.router)
+app.include_router(webhook_api.router)
+app.include_router(process_routes.router)
+app.include_router(data_routes.router)
+app.include_router(settings_routes.router)
+app.include_router(settings_api.router)
 
 # Initialize database on startup
 @app.on_event("startup")
@@ -53,6 +73,7 @@ async def startup_event():
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard():
     """Return the dashboard HTML page"""
+    global webhook_url
     html_content = """
     <!DOCTYPE html>
     <html>
@@ -90,11 +111,84 @@ async def get_dashboard():
             .chart-container { display: flex; gap: 20px; margin-bottom: 20px; }
             .chart-box { flex: 1; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); padding: 15px; height: 300px; }
             .chart-title { font-size: 16px; font-weight: bold; margin-bottom: 10px; }
+            .nav-tabs { display: flex; border-bottom: 1px solid #ddd; margin-bottom: 20px; }
+            .nav-tab { padding: 10px 15px; cursor: pointer; }
+            .nav-tab.active { border: 1px solid #ddd; border-bottom: none; border-radius: 4px 4px 0 0; background-color: #fff; font-weight: bold; }
+            .nav-tab:hover:not(.active) { background-color: #f5f5f5; }
+            .action-btn { background-color: #0078d7; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; }
+            .action-btn:hover { background-color: #005a9e; }
+            .action-btn.danger { background-color: #d9534f; }
+            .action-btn.danger:hover { background-color: #c9302c; }
+            .webhook-url-container { background-color: #f0f7ff; border-left: 4px solid #0078d7; padding: 15px; margin-bottom: 20px; border-radius: 4px; }
+            .webhook-url { font-family: monospace; background-color: #fff; padding: 10px; border: 1px solid #ddd; border-radius: 4px; margin: 10px 0; word-break: break-all; }
+            .copy-btn { background-color: #0078d7; color: white; border: none; padding: 5px 15px; border-radius: 4px; cursor: pointer; }
+            .copy-btn:hover { background-color: #005a9e; }
         </style>
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     </head>
     <body>
         <h1>AWS Alert Insight Hub</h1>
+        
+        <div class="nav-tabs">
+            <div class="nav-tab active">Main Dashboard</div>
+            <div class="nav-tab" onclick="window.location.href='/queue'">Queue Dashboard</div>
+            <div style="margin-left: auto; display: flex; gap: 10px;">
+                <button onclick="window.location.href='/settings'" class="action-btn" style="background-color: #4CAF50;">Settings</button>
+                <button onclick="loadSampleAlerts()" class="action-btn">Load Sample Alerts</button>
+                <button onclick="clearAlerts()" class="action-btn danger">Clear Alerts</button>
+            </div>
+        </div>
+        
+        <script>
+            function loadSampleAlerts() {
+                if (confirm('Load sample alert data? This will replace any existing alerts.')) {
+                    fetch('/api/data/seed/alerts', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        }
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        alert(data.message);
+                        // Reload the page to show updated data
+                        window.location.reload();
+                    })
+                    .catch(error => {
+                        console.error('Error loading sample data:', error);
+                        alert('Error loading sample data');
+                    });
+                }
+            }
+            
+            function clearAlerts() {
+                if (confirm('Are you sure you want to clear all alerts? This cannot be undone.')) {
+                    fetch('/api/data/clear/alerts', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        }
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        alert(data.message);
+                        // Reload the page to show updated data
+                        window.location.reload();
+                    })
+                    .catch(error => {
+                        console.error('Error clearing data:', error);
+                        alert('Error clearing data');
+                    });
+                }
+            }
+        </script>
+        
+        <div class="webhook-url-container">
+            <h3>Inbound Webhook URL for Postmark Integration:</h3>
+            <div class="webhook-url" id="webhook-url">WEBHOOK_URL_PLACEHOLDER</div>
+            <button onclick="copyWebhookUrl()" class="copy-btn">Copy URL</button>
+            <p style="margin-top: 10px; font-style: italic;">Note: This is a local URL. For external access, use a service like ngrok (e.g., run <code>ngrok http 8000</code> and use the generated URL + /api/webhook)</p>
+        </div>
         
         <div class="help-text">
             <p><strong>Tips:</strong> 
@@ -843,6 +937,16 @@ async def get_dashboard():
             }
             
             // Show alert details with remediation actions
+            // Function to copy webhook URL to clipboard
+            function copyWebhookUrl() {
+                const webhookUrl = document.getElementById('webhook-url').textContent;
+                navigator.clipboard.writeText(webhookUrl).then(() => {
+                    alert('Webhook URL copied to clipboard!');
+                }).catch(err => {
+                    console.error('Failed to copy: ', err);
+                });
+            }
+            
             function showAlertDetails(resourceId, alertType, severity) {
                 fetch(`/api/alerts/${resourceId}/${alertType}/${severity}`)
                     .then(response => response.json())
@@ -885,6 +989,8 @@ async def get_dashboard():
     </body>
     </html>
     """
+    # Replace the webhook URL placeholder with the actual URL
+    html_content = html_content.replace("WEBHOOK_URL_PLACEHOLDER", webhook_url)
     return html_content
 
 @app.get("/api/summary", response_model=list[AlertSummary])
@@ -959,6 +1065,68 @@ async def get_filtered_alerts(account: str, service: str, region: str, severity:
     except Exception as e:
         logger.error(f"Error fetching filtered alerts: {e}")
         return []
+
+@app.post("/api/webhook")
+async def webhook_handler(request: Request):
+    """Handle inbound webhook from Postmark"""
+    try:
+        data = await request.json()
+        logger.info(f"Received webhook data: {data}")
+        
+        # Store the webhook data in a single table
+        webhook_id = str(uuid.uuid4())
+        current_time = datetime.now()
+        current_date = current_time.strftime("%Y-%m-%d")
+        timestamp_iso = current_time.isoformat()
+        
+        # Create queue item with pending status and raw data
+        queue_item = {
+            "id": webhook_id,
+            "timestamp": timestamp_iso,
+            "date": current_date,
+            "status": "pending",
+            "source": "postmark",
+            "processed_at": None,
+            "raw_data": data  # Include raw data directly in the queue item
+        }
+        
+        # Save to queue table
+        dynamodb = db.get_dynamodb_client()
+        queue_table = dynamodb.Table('webhook_queue')
+        queue_table.put_item(Item=queue_item)
+        logger.info(f"Created queue item with pending status: {webhook_id}")
+        
+        # Process the webhook immediately in the background
+        import asyncio
+        
+        # Create a background task to process the webhook
+        async def process_webhook_async():
+            try:
+                # Import here to avoid circular imports
+                from .routes.process_routes import process_webhook
+                
+                # Process the webhook
+                await process_webhook(webhook_id)
+                logger.info(f"Webhook {webhook_id} processed automatically")
+            except Exception as e:
+                logger.error(f"Error processing webhook {webhook_id}: {str(e)}")
+        
+        # Start the background task
+        asyncio.create_task(process_webhook_async())
+        
+        # Return immediately with pending status
+        return {
+            "status": "success", 
+            "message": "Webhook received and processing started", 
+            "webhook_id": webhook_id
+        }
+    except Exception as e:
+        logger.error(f"Error handling webhook: {str(e)}")
+        return {"status": "error", "message": str(e)}
+        
+    except Exception as e:
+        logger.error(f"Error processing webhook: {e}")
+        return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
     import uvicorn

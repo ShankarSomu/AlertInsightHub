@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 from typing import List, Dict, Any
 from .models import Alert, SeverityLevel
+import requests
 
 # DynamoDB setup
 def get_dynamodb_client():
@@ -119,6 +120,26 @@ def seed_sample_data():
             "severity": "medium",
             "timestamp": datetime.now().isoformat(),
             "message": "Moderate CPU utilization"
+        },
+        {
+            "id": str(uuid.uuid4()),
+            "account_id": "456789012345",
+            "service": "DynamoDB",
+            "resource_id": "users-table",
+            "alert_type": "Capacity",
+            "severity": "high",
+            "timestamp": datetime.now().isoformat(),
+            "message": "Provisioned capacity exceeded"
+        },
+        {
+            "id": str(uuid.uuid4()),
+            "account_id": "456789012345",
+            "service": "S3",
+            "resource_id": "data-bucket",
+            "alert_type": "Size",
+            "severity": "medium",
+            "timestamp": datetime.now().isoformat(),
+            "message": "Bucket size growing rapidly"
         }
     ]
     
@@ -380,8 +401,327 @@ def get_filtered_alerts(account_id: str, service: str, region: str, severity: st
         print(f"Error in get_filtered_alerts: {e}")
         return []
 
+def get_webhook_queue_items(status=None, date=None, limit=50):
+    """Get webhook queue items, optionally filtered by status and/or date"""
+    dynamodb = get_dynamodb_client()
+    
+    # Check if table exists and create it if it doesn't
+    existing_tables = [table.name for table in dynamodb.tables.all()]
+    if 'webhook_queue' not in existing_tables:
+        print("Creating webhook_queue table as it doesn't exist")
+        queue_table = dynamodb.create_table(
+            TableName='webhook_queue',
+            KeySchema=[
+                {'AttributeName': 'id', 'KeyType': 'HASH'},
+            ],
+            AttributeDefinitions=[
+                {'AttributeName': 'id', 'AttributeType': 'S'},
+                {'AttributeName': 'status', 'AttributeType': 'S'},
+                {'AttributeName': 'timestamp', 'AttributeType': 'S'},
+                {'AttributeName': 'date', 'AttributeType': 'S'},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    'IndexName': 'status-timestamp-index',
+                    'KeySchema': [
+                        {'AttributeName': 'status', 'KeyType': 'HASH'},
+                        {'AttributeName': 'timestamp', 'KeyType': 'RANGE'}
+                    ],
+                    'Projection': {'ProjectionType': 'ALL'},
+                    'ProvisionedThroughput': {'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+                },
+                {
+                    'IndexName': 'date-index',
+                    'KeySchema': [
+                        {'AttributeName': 'date', 'KeyType': 'HASH'},
+                    ],
+                    'Projection': {'ProjectionType': 'ALL'},
+                    'ProvisionedThroughput': {'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+                }
+            ],
+            ProvisionedThroughput={'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+        )
+        # Wait for table to be created
+        queue_table.meta.client.get_waiter('table_exists').wait(TableName='webhook_queue')
+        print("webhook_queue table created successfully")
+    
+    table = dynamodb.Table('webhook_queue')
+    
+    try:
+        # For debugging
+        print(f"Getting webhook queue items with status={status}, date={date}, limit={limit}")
+        
+        # Use scan instead of query for simplicity and to avoid index issues
+        if status and date and isinstance(date, str):
+            # Filter by both status and date
+            response = table.scan(
+                FilterExpression='#status = :status AND #date = :date',
+                ExpressionAttributeNames={'#status': 'status', '#date': 'date'},
+                ExpressionAttributeValues={':status': status, ':date': date},
+                Limit=limit
+            )
+        elif status:
+            # Filter by status only
+            response = table.scan(
+                FilterExpression='#status = :status',
+                ExpressionAttributeNames={'#status': 'status'},
+                ExpressionAttributeValues={':status': status},
+                Limit=limit
+            )
+        elif date and isinstance(date, str):
+            # Filter by date only
+            response = table.scan(
+                FilterExpression='#date = :date',
+                ExpressionAttributeNames={'#date': 'date'},
+                ExpressionAttributeValues={':date': date},
+                Limit=limit
+            )
+        else:
+            # Scan all items
+            response = table.scan(Limit=limit)
+        
+        items = response.get('Items', [])
+        print(f"Found {len(items)} webhook queue items")
+        
+        # For debugging, print the first item if available
+        if items:
+            print(f"First item: {items[0]}")
+        
+        return items
+    except Exception as e:
+        print(f"Error in get_webhook_queue_items: {e}")
+        return []
+
+def update_webhook_status(webhook_id, status, error_message=None):
+    """Update the status of a webhook queue item"""
+    dynamodb = get_dynamodb_client()
+    table = dynamodb.Table('webhook_queue')
+    
+    try:
+        update_expr = "SET #status = :status, processed_at = :processed_at"
+        expr_attr_values = {
+            ':status': status,
+            ':processed_at': datetime.now().isoformat()
+        }
+        
+        if error_message:
+            update_expr += ", error_message = :error"
+            expr_attr_values[':error'] = error_message
+        
+        table.update_item(
+            Key={'id': webhook_id},
+            UpdateExpression=update_expr,
+            ExpressionAttributeNames={'#status': 'status'},
+            ExpressionAttributeValues=expr_attr_values
+        )
+        
+        return True
+    except Exception as e:
+        print(f"Error updating webhook status: {e}")
+        return False
+
+def get_webhook_stats(date=None):
+    """Get webhook queue statistics, optionally filtered by date"""
+    dynamodb = get_dynamodb_client()
+    
+    # Check if table exists first
+    existing_tables = [table.name for table in dynamodb.tables.all()]
+    if 'webhook_queue' not in existing_tables:
+        print("webhook_queue table doesn't exist for stats")
+        return {
+            'total': 0,
+            'pending': 0,
+            'processed': 0,
+            'error': 0,
+            'dates': {}
+        }
+    
+    table = dynamodb.Table('webhook_queue')
+    
+    try:
+        # Use scan instead of query for simplicity
+        if date:
+            response = table.scan(
+                FilterExpression='#date = :date',
+                ExpressionAttributeNames={'#date': 'date'},
+                ExpressionAttributeValues={':date': date}
+            )
+        else:
+            # Scan all items
+            response = table.scan()
+        
+        items = response['Items']
+        
+        # Calculate statistics
+        stats = {
+            'total': len(items),
+            'pending': 0,
+            'processed': 0,
+            'error': 0,
+            'dates': {}
+        }
+        
+        for item in items:
+            status = item.get('status', 'unknown')
+            item_date = item.get('date', 'unknown')
+            
+            # Update overall counts
+            if status == 'pending':
+                stats['pending'] += 1
+            elif status == 'processed':
+                stats['processed'] += 1
+            elif status == 'error':
+                stats['error'] += 1
+            
+            # Update date-specific counts
+            if item_date not in stats['dates']:
+                stats['dates'][item_date] = {
+                    'total': 0,
+                    'pending': 0,
+                    'processed': 0,
+                    'error': 0
+                }
+            
+            stats['dates'][item_date]['total'] += 1
+            if status == 'pending':
+                stats['dates'][item_date]['pending'] += 1
+            elif status == 'processed':
+                stats['dates'][item_date]['processed'] += 1
+            elif status == 'error':
+                stats['dates'][item_date]['error'] += 1
+        
+        return stats
+    except Exception as e:
+        print(f"Error in get_webhook_stats: {e}")
+        return {
+            'total': 0,
+            'pending': 0,
+            'processed': 0,
+            'error': 0,
+            'dates': {}
+        }
+
+def get_gorqcloud_api_key():
+    """Get the Groq API key from settings"""
+    dynamodb = get_dynamodb_client()
+    
+    # Check if settings table exists
+    existing_tables = [table.name for table in dynamodb.tables.all()]
+    if 'settings' not in existing_tables:
+        return None
+    
+    table = dynamodb.Table('settings')
+    response = table.get_item(Key={'setting_name': 'gorqcloud_api_key'})
+    
+    if 'Item' in response:
+        return response['Item'].get('setting_value')
+    
+    return None
+
+def get_agent_settings():
+    """Get the agent role and description from settings"""
+    dynamodb = get_dynamodb_client()
+    
+    # Check if settings table exists
+    existing_tables = [table.name for table in dynamodb.tables.all()]
+    if 'settings' not in existing_tables:
+        return None, None
+    
+    table = dynamodb.Table('settings')
+    
+    # Get agent role
+    role_response = table.get_item(Key={'setting_name': 'agent_role'})
+    role = role_response.get('Item', {}).get('setting_value', 'AWS Cloud Expert')
+    
+    # Get agent description
+    desc_response = table.get_item(Key={'setting_name': 'agent_description'})
+    description = desc_response.get('Item', {}).get('setting_value', 
+        'You are an AWS cloud expert specializing in monitoring and resolving alerts. Provide concise, actionable recommendations.')
+    
+    return role, description
+
 def get_remediation_action(service: str, alert_type: str, severity: str):
-    """Get remediation recommendations based on service, alert type and severity"""
+    """Get remediation recommendations using Groq LLM if available, otherwise use default"""
+    # Try to get API key
+    api_key = get_gorqcloud_api_key()
+    use_ai = False
+    
+    # Check if AI recommendations are enabled
+    dynamodb = get_dynamodb_client()
+    existing_tables = [table.name for table in dynamodb.tables.all()]
+    if 'settings' in existing_tables:
+        table = dynamodb.Table('settings')
+        response = table.get_item(Key={'setting_name': 'use_ai_recommendations'})
+        if 'Item' in response and response['Item'].get('setting_value') == 'true':
+            use_ai = True
+    
+    if api_key and use_ai:
+        try:
+            # Use the Groq client to get a recommendation
+            from groq import Groq
+            import os
+            
+            # Get agent role and description
+            agent_role, agent_description = get_agent_settings()
+            
+            # Set the API key for the Groq client
+            os.environ["GROQ_API_KEY"] = api_key
+            
+            # Initialize the Groq client
+            client = Groq(api_key=api_key)
+            
+            # Create the system message with the agent role and description
+            system_message = f"You are a {agent_role}. {agent_description}"
+            
+            # Create the user prompt for the recommendation
+            user_prompt = f"Provide a concise recommendation for addressing a {severity} severity {alert_type} alert on an AWS {service} resource. Keep it under 100 words."
+            
+            # Make the API call
+            completion = client.chat.completions.create(
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": system_message
+                    },
+                    {
+                        "role": "user",
+                        "content": user_prompt
+                    }
+                ],
+                temperature=0.7,
+                max_completion_tokens=100,
+                top_p=1,
+                stream=False
+            )
+            
+            # Extract the recommendation from the response
+            if completion.choices and len(completion.choices) > 0:
+                ai_recommendation = completion.choices[0].message.content.strip()
+                # Store the recommendation in the database for future use
+                store_recommendation(service, alert_type, severity, ai_recommendation)
+                return ai_recommendation
+                
+        except Exception as e:
+            print(f"Error calling Groq API: {e}")
+    
+    # Fallback to default recommendations if API call fails or no API key
+    default_remediation = f"Investigate the {severity} {alert_type} alert for your {service} resource."
+    
+    # Check if we already have a recommendation in the database
+    if 'alert_recommendations' in existing_tables:
+        table = dynamodb.Table('alert_recommendations')
+        response = table.get_item(
+            Key={
+                'service': service,
+                'alert_type_severity': f"{alert_type}_{severity}"
+            }
+        )
+        
+        if 'Item' in response:
+            return response['Item'].get('recommendation', default_remediation)
+    
+    # Default hardcoded recommendations as fallback
     remediation_map = {
         "EC2": {
             "CPU": {
@@ -393,16 +733,6 @@ def get_remediation_action(service: str, alert_type: str, severity: str):
                 "medium": "Monitor memory usage and consider application optimization.",
                 "high": "Increase instance memory or optimize memory-intensive processes.",
                 "critical": "Immediately increase instance memory and investigate memory leaks."
-            },
-            "Disk": {
-                "medium": "Clean up unnecessary files or consider increasing storage.",
-                "high": "Increase EBS volume size or add additional volumes.",
-                "critical": "Immediately increase storage and implement better disk management."
-            },
-            "Network": {
-                "medium": "Monitor network traffic patterns for optimization.",
-                "high": "Optimize network-intensive operations or increase bandwidth.",
-                "critical": "Investigate potential DDoS attack or network bottlenecks."
             }
         },
         "RDS": {
@@ -410,54 +740,9 @@ def get_remediation_action(service: str, alert_type: str, severity: str):
                 "medium": "Review and optimize database queries.",
                 "high": "Scale up your database instance or implement read replicas.",
                 "critical": "Immediately scale up your instance and optimize critical queries."
-            },
-            "Memory": {
-                "medium": "Review database configuration for memory settings.",
-                "high": "Increase instance memory or optimize memory-intensive queries.",
-                "critical": "Immediately increase instance memory and fix memory leaks."
-            },
-            "Storage": {
-                "medium": "Clean up old data or implement archiving strategy.",
-                "high": "Increase storage capacity or implement data partitioning.",
-                "critical": "Immediately increase storage and implement emergency cleanup."
-            },
-            "IOPS": {
-                "medium": "Review I/O intensive queries and optimize.",
-                "high": "Increase provisioned IOPS or implement caching.",
-                "critical": "Immediately increase provisioned IOPS and fix I/O bottlenecks."
-            },
-            "Connections": {
-                "medium": "Review connection pooling configuration.",
-                "high": "Implement better connection management or increase max connections.",
-                "critical": "Immediately fix connection leaks and optimize connection usage."
-            }
-        },
-        "Lambda": {
-            "Timeout": {
-                "medium": "Review function logic for optimization opportunities.",
-                "high": "Increase timeout setting or break function into smaller parts.",
-                "critical": "Immediately refactor function to handle workload appropriately."
-            },
-            "Error": {
-                "medium": "Review error logs and implement better error handling.",
-                "high": "Fix critical errors and implement retry mechanisms.",
-                "critical": "Immediately fix function errors and implement circuit breakers."
-            },
-            "Throttle": {
-                "medium": "Review concurrency settings and usage patterns.",
-                "high": "Increase concurrency limits or implement backoff strategies.",
-                "critical": "Immediately increase concurrency limits and optimize invocation patterns."
-            },
-            "Memory": {
-                "medium": "Review memory usage and optimize function code.",
-                "high": "Increase allocated memory or optimize memory-intensive operations.",
-                "critical": "Immediately increase memory allocation and fix memory leaks."
             }
         }
     }
-    
-    # Get default remediation if specific one is not found
-    default_remediation = f"Investigate the {severity} {alert_type} alert for your {service} resource."
     
     # Try to get specific remediation
     service_remediation = remediation_map.get(service, {})
@@ -465,3 +750,39 @@ def get_remediation_action(service: str, alert_type: str, severity: str):
     specific_remediation = alert_type_remediation.get(severity, default_remediation)
     
     return specific_remediation
+
+def store_recommendation(service, alert_type, severity, recommendation):
+    """Store a recommendation in the database"""
+    dynamodb = get_dynamodb_client()
+    
+    # Check if recommendations table exists
+    existing_tables = [table.name for table in dynamodb.tables.all()]
+    if 'alert_recommendations' not in existing_tables:
+        # Create recommendations table
+        recommendations_table = dynamodb.create_table(
+            TableName='alert_recommendations',
+            KeySchema=[
+                {'AttributeName': 'service', 'KeyType': 'HASH'},
+                {'AttributeName': 'alert_type_severity', 'KeyType': 'RANGE'},
+            ],
+            AttributeDefinitions=[
+                {'AttributeName': 'service', 'AttributeType': 'S'},
+                {'AttributeName': 'alert_type_severity', 'AttributeType': 'S'},
+            ],
+            ProvisionedThroughput={'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+        )
+        # Wait for table to be created
+        recommendations_table.meta.client.get_waiter('table_exists').wait(TableName='alert_recommendations')
+        table = dynamodb.Table('alert_recommendations')
+    else:
+        table = dynamodb.Table('alert_recommendations')
+    
+    # Save recommendation
+    table.put_item(
+        Item={
+            'service': service,
+            'alert_type_severity': f"{alert_type}_{severity}",
+            'recommendation': recommendation,
+            'created_at': datetime.now().isoformat()
+        }
+    )
